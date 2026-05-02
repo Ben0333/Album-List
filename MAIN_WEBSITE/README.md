@@ -5,19 +5,30 @@ A small album-list web app with guest lists, username/email/password accounts, c
 ## Run Locally
 
 ```powershell
+cd MAIN_WEBSITE
 npm install
 npm start
 ```
 
 Open http://localhost:3000.
 
-On Windows, you can also double-click `Start Albums App.bat` to start the server and open the site, then double-click `Stop Albums App.bat` when you want to shut it down.
+From the original parent folder, you can also double-click `Start Albums App.bat` to start the main server and open the site, then double-click `Stop Albums App.bat` when you want to shut it down.
 
 For development:
 
 ```powershell
 npm run dev
 ```
+
+For the local-only admin dashboard:
+
+```powershell
+npm run admin
+```
+
+Open http://127.0.0.1:3001. The admin app binds to localhost by default and is separate from the public website.
+
+From the original parent folder, `Start Albums Admin.bat` and `Stop Albums Admin.bat` do the same for the local admin dashboard. `Start Cloudflare Tunnel.bat` and `Stop Cloudflare Tunnel.bat` control the installed Cloudflared Windows service.
 
 ## Configuration
 
@@ -26,6 +37,9 @@ Copy `.env.example` to `.env` when you want custom settings.
 ```env
 NODE_ENV=development
 PORT=3000
+ADMIN_PORT=3001
+ADMIN_HOST=127.0.0.1
+CLOUDFLARED_SERVICE_NAME=Cloudflared
 APP_ORIGIN=http://localhost:3000
 SESSION_COOKIE_NAME=albums_sid
 SESSION_DAYS=30
@@ -64,8 +78,10 @@ For production, set `NODE_ENV=production`, `APP_ORIGIN` to the public `https://`
 - Shuffle picks an unlistened album when possible, scrolls to it, and highlights it.
 - Modern action buttons use minimalist icons; the late-90s theme switches those controls back to text labels.
 - Albums are added by clicking a metadata search result. Covers and track lists are filled automatically from the iTunes Search/Lookup API, including song-title searches, with MusicBrainz fallback for missing/stylized albums.
+- iTunes album lookup also checks the Japanese storefront for matching native-script track names and keeps rating keys stable when it only changes display titles.
 - Logged-in list members can mark albums listened, and that listened state follows the album/user across lists.
 - Logged-in list members can rate tracks 0-10.
+- Logged-in list members can exclude individual track ratings from album averages.
 - If track metadata is unavailable, logged-in list members can rate the album directly 0-10.
 - Rating every track on an album automatically marks that album listened.
 - Rated/completed album activity is kept for profiles even if the list entry is later removed.
@@ -74,6 +90,7 @@ For production, set `NODE_ENV=production`, `APP_ORIGIN` to the public `https://`
 - Users have profile pages at `/u/:username` showing public lists and rated albums, with fully listened albums sorted above unfinished rated albums.
 - Rated albums on profile and history pages open detail views showing that user's recorded song or album-level ratings. On your own profile, those ratings are editable.
 - Visible usernames and profile photos link to the user's profile.
+- A separate local-only admin dashboard can view site statistics, start/restart/stop the public website process, start/stop the Cloudflare tunnel, run emergency lockdown, disable accounts, and anonymize accounts while preserving their list, rating, and listening data.
 
 ## Production Notes
 
@@ -105,7 +122,7 @@ Test restores before launch; an untested backup is not a launch backup.
 
 This hardening targets a small public beta, not enterprise compliance. Remaining intentional limits:
 
-- No email verification, password reset, admin moderation console, audit log, or account deletion flow yet.
+- No email verification, password reset, public admin account system, or public account deletion flow yet. The admin dashboard is local-only and not intended for deployment.
 - Rate limits are process-local; use one Node process or add shared rate limiting before horizontal scaling.
 - Uploaded avatars are stored in SQLite as constrained data URLs, which is acceptable for a small beta but not ideal for large media volume.
 - Album metadata depends on public iTunes/MusicBrainz/Spotify oEmbed endpoints and can be degraded by upstream rate limits.
@@ -114,6 +131,6 @@ Node currently prints an experimental warning for `node:sqlite`. The app uses it
 
 The album search endpoint is API-key-free and currently uses cached Apple iTunes Search/Lookup calls plus MusicBrainz release search. MusicBrainz queries split mixed searches such as `album artist` or `artist album` into fielded release/artist clauses, include Albums and EPs, and are paced to respect MusicBrainz's public API limits. If Spotify, YouTube, or another metadata source is added later, keep `/api/albums/search` and `/api/albums/lookup/:providerId` as the frontend contract.
 
-Explore data lives in `src/explore-data.js`. The `1001-all-editions` list was generated from https://1001albumsgenerator.com/albums on April 28, 2026 and intentionally mirrors that public page across all editions, including Spotify album IDs used for cover hydration. Covers are cached in SQLite as they are viewed.
+Explore data lives in `apps/main/src/explore-data.js`. The `1001-all-editions` list was generated from https://1001albumsgenerator.com/albums on April 28, 2026 and intentionally mirrors that public page across all editions, including Spotify album IDs used for cover hydration. Covers are cached in SQLite as they are viewed.
 
 Recommendations currently use a local rating-based algorithm: high-rated albums identify similar users, then the app suggests highly rated albums the current user has not listed/rated yet. If there is not enough rating data, it falls back to explore-list albums.

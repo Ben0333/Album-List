@@ -1,7 +1,11 @@
-node_modules/
-.env*
-data/*.sqlite
-data/*.sqlite-*
+**/node_modules/
+**/.env
+**/.env.*
+!**/.env.example
+**/data/*.sqlite
+**/data/*.sqlite-*
 npm-debug.log*
 .DS_Store
-.server.pid
+**/.server.pid
+**/.admin.pid
+*.bat

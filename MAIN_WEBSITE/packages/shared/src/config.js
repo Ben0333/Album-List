@@ -31,6 +31,14 @@ function isLocalOrigin(origin) {
   return hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '::1';
 }
 
+function parseAdminHost(value) {
+  const host = String(value || '127.0.0.1').trim().toLowerCase();
+  if (!['127.0.0.1', 'localhost', '::1'].includes(host)) {
+    throw new Error('ADMIN_HOST must be localhost, 127.0.0.1, or ::1.');
+  }
+  return host;
+}
+
 const nodeEnv = process.env.NODE_ENV || 'development';
 const appOrigin = parseAppOrigin(process.env.APP_ORIGIN || 'http://localhost:3000');
 const cookieSecure = parseBoolean(process.env.COOKIE_SECURE, nodeEnv === 'production');
@@ -40,6 +48,8 @@ export const config = {
   nodeEnv,
   isProduction: nodeEnv === 'production',
   port: parsePositiveInteger('PORT', process.env.PORT, 3000, { min: 1, max: 65535 }),
+  adminPort: parsePositiveInteger('ADMIN_PORT', process.env.ADMIN_PORT, 3001, { min: 1, max: 65535 }),
+  adminHost: parseAdminHost(process.env.ADMIN_HOST),
   appOrigin,
   allowedOrigins: [appOrigin],
   cookieName: process.env.SESSION_COOKIE_NAME || 'albums_sid',

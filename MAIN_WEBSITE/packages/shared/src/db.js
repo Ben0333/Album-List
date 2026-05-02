@@ -32,6 +32,9 @@ db.exec(`
     history_token TEXT NOT NULL UNIQUE,
     history_visibility TEXT NOT NULL DEFAULT 'private' CHECK (history_visibility IN ('private', 'unlisted')),
     theme_preference TEXT NOT NULL DEFAULT 'system' CHECK (theme_preference IN ('system', 'light', 'dark', 'retro')),
+    disabled_at TEXT,
+    disabled_reason TEXT NOT NULL DEFAULT '',
+    anonymized_at TEXT,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
   );
 
@@ -162,6 +165,16 @@ db.exec(`
     PRIMARY KEY (slug, album_index)
   );
 
+  CREATE TABLE IF NOT EXISTS admin_action_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    action TEXT NOT NULL CHECK (action IN ('disable', 'enable', 'anonymize')),
+    user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    previous_username TEXT NOT NULL DEFAULT '',
+    new_username TEXT NOT NULL DEFAULT '',
+    details TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+  );
+
   CREATE INDEX IF NOT EXISTS idx_lists_owner ON lists(owner_user_id);
   CREATE INDEX IF NOT EXISTS idx_lists_visibility_updated ON lists(visibility, updated_at);
   CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
@@ -174,12 +187,19 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_removal_votes_album ON list_album_removal_votes(list_album_id);
   CREATE INDEX IF NOT EXISTS idx_list_messages_list ON list_messages(list_id, created_at);
   CREATE INDEX IF NOT EXISTS idx_track_ratings_album ON track_ratings(album_key);
+  CREATE INDEX IF NOT EXISTS idx_track_ratings_album_track ON track_ratings(album_key, track_key);
   CREATE INDEX IF NOT EXISTS idx_track_ratings_user_album ON track_ratings(user_id, album_key);
+  CREATE INDEX IF NOT EXISTS idx_track_ratings_user_rating ON track_ratings(user_id, rating, album_key);
   CREATE INDEX IF NOT EXISTS idx_user_album_activity_user ON user_album_activity(user_id, updated_at);
+  CREATE INDEX IF NOT EXISTS idx_user_album_activity_album_updated ON user_album_activity(album_key, updated_at);
+  CREATE INDEX IF NOT EXISTS idx_album_completions_user_completed ON album_completions(user_id, completed_at);
+  CREATE INDEX IF NOT EXISTS idx_list_albums_album_updated ON list_albums(album_key, updated_at);
   CREATE INDEX IF NOT EXISTS idx_list_invites_invitee ON list_invites(invitee_user_id, status);
   CREATE UNIQUE INDEX IF NOT EXISTS idx_list_invites_one_pending
     ON list_invites(list_id, invitee_user_id)
     WHERE status = 'pending';
+  CREATE INDEX IF NOT EXISTS idx_admin_action_log_created ON admin_action_log(created_at);
+  CREATE INDEX IF NOT EXISTS idx_admin_action_log_user ON admin_action_log(user_id, created_at);
 `);
 
 function ensureColumn(table, column, definition) {
@@ -192,6 +212,14 @@ function ensureColumn(table, column, definition) {
 ensureColumn('users', 'avatar_data_url', "TEXT NOT NULL DEFAULT ''");
 ensureColumn('users', 'music_platform', "TEXT NOT NULL DEFAULT 'na'");
 ensureColumn('users', 'accent_color', "TEXT NOT NULL DEFAULT ''");
+ensureColumn('users', 'disabled_at', 'TEXT');
+ensureColumn('users', 'disabled_reason', "TEXT NOT NULL DEFAULT ''");
+ensureColumn('users', 'anonymized_at', 'TEXT');
+
+db.exec(`
+  CREATE INDEX IF NOT EXISTS idx_users_disabled ON users(disabled_at);
+  CREATE INDEX IF NOT EXISTS idx_users_anonymized ON users(anonymized_at);
+`);
 
 const inviteTable = db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'list_invites'").get();
 if (inviteTable?.sql?.includes('UNIQUE (list_id, invitee_user_id, status)')) {
@@ -334,4 +362,54 @@ function ensureUniqueListAlbums() {
   db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_list_albums_unique_key ON list_albums(list_id, album_key)');
 }
 
+function repairKnownAlbumTracklists() {
+  const bowieAlbumKey = albumKey('The Man Who Sold the World', 'David Bowie');
+  const canonicalTracks = [
+    'The Width of a Circle',
+    'All the Madmen',
+    'Black Country Rock',
+    'After All',
+    'Running Gun Blues',
+    'Saviour Machine',
+    'She Shook Me Cold',
+    'The Man Who Sold the World',
+    'The Supermen'
+  ];
+  const knownBonusTrackKeys = new Set(['lightning frightening', 'holy holy', 'moonage daydream', 'hang onto yourself', 'hang on to yourself']);
+  const affectedAlbums = db
+    .prepare(
+      `SELECT la.id
+       FROM list_albums la
+       JOIN album_tracks at ON at.list_album_id = la.id
+       WHERE la.album_key = ?
+       GROUP BY la.id
+       HAVING COUNT(at.id) != ? OR SUM(CASE WHEN at.track_key IN (${[...knownBonusTrackKeys].map(() => '?').join(',')}) THEN 1 ELSE 0 END) > 0`
+    )
+    .all(bowieAlbumKey, canonicalTracks.length, ...knownBonusTrackKeys);
+
+  if (!affectedAlbums.length) return;
+
+  transaction(() => {
+    db.prepare(
+      `UPDATE OR IGNORE track_ratings
+       SET track_key = ?, track_title = ?
+       WHERE album_key = ? AND track_key = ?`
+    ).run(trackKey(canonicalTracks[0], 1), canonicalTracks[0], bowieAlbumKey, trackKey('Width of a Circle', 1));
+
+    const deleteTracks = db.prepare('DELETE FROM album_tracks WHERE list_album_id = ?');
+    const insertTrack = db.prepare(
+      `INSERT INTO album_tracks (list_album_id, track_key, title, position)
+       VALUES (?, ?, ?, ?)`
+    );
+
+    for (const album of affectedAlbums) {
+      deleteTracks.run(album.id);
+      canonicalTracks.forEach((title, index) => {
+        insertTrack.run(album.id, trackKey(title, index + 1), title, index + 1);
+      });
+    }
+  })();
+}
+
+repairKnownAlbumTracklists();
 ensureUniqueListAlbums();

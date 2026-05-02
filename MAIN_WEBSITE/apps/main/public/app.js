@@ -3,12 +3,16 @@ const OLD_GUEST_KEY = 'albums_guest_v1';
 const THEME_KEY = 'albums_theme_preference_v1';
 const CHAT_OPEN_KEY = 'albums_chat_open_v1';
 const CHAT_READ_KEY = 'albums_chat_read_v1';
-const LIVE_SYNC_MS = 1800;
+const LIVE_SYNC_MS = 5000;
 
 const app = document.querySelector('#app');
 const mediaDark = window.matchMedia('(prefers-color-scheme: dark)');
-let searchTimer = null;
-let searchNonce = 0;
+let albumSearchTimer = null;
+let userSearchTimer = null;
+let albumSearchNonce = 0;
+let userSearchNonce = 0;
+let albumSearchController = null;
+let userSearchController = null;
 let liveTimer = null;
 let liveInFlight = false;
 let cropDrag = null;
@@ -30,13 +34,16 @@ const state = {
   selectedPlatform: 'na',
   listTab: 'albums',
   albumQuery: '',
+  albumSearchOpen: false,
   suggestions: [],
   selectedAlbum: null,
   searching: false,
   shareOpen: false,
   userSearchQuery: '',
+  userSearchOpen: false,
   userResults: [],
   userSearching: false,
+  profileQuery: '',
   shareRole: 'editor',
   settingsOpen: false,
   avatarCrop: null,
@@ -98,6 +105,43 @@ app.oninput = (event) => {
   if (!target) return;
   handleInput(target).catch(showError);
 };
+
+app.onkeydown = (event) => {
+  const target = event.target.closest('[data-input]');
+  if (!target) return;
+  handleInputKeydown(target, event);
+};
+
+app.addEventListener('focusin', (event) => {
+  const target = event.target.closest('[data-input]');
+  if (!target) return;
+  handleInputFocus(target);
+});
+
+document.addEventListener('click', (event) => {
+  if (event.target instanceof Element && event.target.closest('[data-search-scope]')) return;
+  if (dismissOpenSearches()) render();
+});
+
+document.addEventListener(
+  'pointerdown',
+  (event) => {
+    if (event.target instanceof Element && event.target.closest('[data-search-scope]')) return;
+    if (dismissOpenSearches()) hideSearchPopups();
+  },
+  true
+);
+
+app.addEventListener('focusout', (event) => {
+  if (!(event.target instanceof Element)) return;
+  const scope = event.target.closest('[data-search-scope]');
+  if (!scope) return;
+  const search = scope.dataset.searchScope;
+  window.setTimeout(() => {
+    if (document.activeElement instanceof Element && document.activeElement.closest(`[data-search-scope="${search}"]`)) return;
+    if (dismissSearch(search)) render();
+  }, 0);
+});
 
 app.onpointerdown = (event) => {
   const frame = event.target.closest('[data-crop-frame]');
@@ -177,12 +221,15 @@ async function loadRoute() {
   state.error = '';
   state.notice = '';
   state.albumQuery = '';
+  state.albumSearchOpen = false;
   state.suggestions = [];
   state.selectedAlbum = null;
   state.shareOpen = false;
   state.userSearchQuery = '';
+  state.userSearchOpen = false;
   state.userResults = [];
   state.userSearching = false;
+  state.profileQuery = '';
   state.settingsOpen = false;
   state.avatarCrop = null;
   state.listPicker = null;
@@ -288,6 +335,14 @@ function render(options = {}) {
   if (options.focusUserSearch) {
     queueMicrotask(() => {
       const input = app.querySelector('[data-input="user-search"]');
+      if (!input) return;
+      input.focus();
+      input.setSelectionRange(input.value.length, input.value.length);
+    });
+  }
+  if (options.focusProfileSearch) {
+    queueMicrotask(() => {
+      const input = app.querySelector('[data-input="profile-search"]');
       if (!input) return;
       input.focus();
       input.setSelectionRange(input.value.length, input.value.length);
@@ -490,13 +545,15 @@ function renderHistoryAlbumPage() {
 
 function renderProfilePage() {
   if (!state.profile) return `<main class="page-shell"><div class="empty-minimal">Loading.</div></main>`;
+  const profileAlbums = state.profile.ratedAlbums || [];
+  const filteredAlbums = filterProfileAlbums(profileAlbums);
   return `
     <main class="page-shell profile-shell">
       <section class="profile-hero">
         ${renderAvatar(state.profile.user, true)}
         <div>
           <h1>${escapeHtml(state.profile.user.username)}</h1>
-          <p>${state.profile.lists.length} public lists - ${state.profile.ratedAlbums.length} rated albums</p>
+          <p>${state.profile.lists.length} public lists - ${profileAlbums.length} listened or rated albums</p>
         </div>
       </section>
       <section class="profile-section">
@@ -523,12 +580,15 @@ function renderProfilePage() {
         </div>
       </section>
       <section class="profile-section">
-        <h2>Rated albums</h2>
+        <h2>Albums</h2>
+        ${renderProfileSearch(profileAlbums.length)}
         <div class="album-stack">
           ${
-            state.profile.ratedAlbums.length
-              ? state.profile.ratedAlbums.map(renderProfileAlbum).join('')
-              : '<div class="empty-minimal">No rated albums.</div>'
+            profileAlbums.length
+              ? filteredAlbums.length
+                ? filteredAlbums.map(renderProfileAlbum).join('')
+                : `<div class="empty-minimal">No albums match "${escapeHtml(state.profileQuery.trim())}".</div>`
+              : '<div class="empty-minimal">No listened or rated albums yet.</div>'
           }
         </div>
       </section>
@@ -735,6 +795,81 @@ function renderProfileAlbum(album) {
   `;
 }
 
+function renderProfileSearch(albumCount) {
+  if (!albumCount) return '';
+  return `
+    <div class="profile-search">
+      ${renderSearchField({
+        search: 'profile',
+        input: 'profile-search',
+        value: state.profileQuery,
+        placeholder: 'Search albums or artists...',
+        label: `Search ${state.profile.user.username}'s albums`,
+        clearLabel: 'Clear profile search'
+      })}
+    </div>
+  `;
+}
+
+function filterProfileAlbums(albums) {
+  const query = normalizeAlbumText(state.profileQuery);
+  if (!query) return albums;
+  return albums.filter((album) => profileAlbumMatchesQuery(album, query));
+}
+
+function profileAlbumSearchText(album) {
+  return normalizeAlbumText(
+    [
+      album.title,
+      album.artist,
+      album.average,
+      album.fullyListened ? 'listened complete finished' : 'not finished',
+      album.inCommon ? 'in common' : '',
+      ...(album.ratings || []).map((rating) => rating.trackTitle)
+    ].join(' ')
+  );
+}
+
+function profileAlbumMatchesQuery(album, normalizedQuery) {
+  const targetText = profileAlbumSearchText(album);
+  if (targetText.includes(normalizedQuery)) return true;
+  const targetWords = targetText.split(' ').filter(Boolean);
+  const queryWords = normalizedQuery.split(' ').filter(Boolean);
+  return queryWords.every((queryWord) => targetWords.some((targetWord) => clientWordsMatch(queryWord, targetWord)));
+}
+
+function clientWordsMatch(left, right) {
+  if (!left || !right) return false;
+  if (left === right) return true;
+  if (left.length >= 4 && right.length >= 4 && (left.includes(right) || right.includes(left))) return true;
+  if (Math.min(left.length, right.length) >= 4 && clientEditDistanceWithinOne(left, right)) return true;
+  return false;
+}
+
+function clientEditDistanceWithinOne(left, right) {
+  if (left === right) return true;
+  if (Math.abs(left.length - right.length) > 1) return false;
+  let edits = 0;
+  let leftIndex = 0;
+  let rightIndex = 0;
+  while (leftIndex < left.length && rightIndex < right.length) {
+    if (left[leftIndex] === right[rightIndex]) {
+      leftIndex += 1;
+      rightIndex += 1;
+      continue;
+    }
+    edits += 1;
+    if (edits > 1) return false;
+    if (left.length > right.length) leftIndex += 1;
+    else if (right.length > left.length) rightIndex += 1;
+    else {
+      leftIndex += 1;
+      rightIndex += 1;
+    }
+  }
+  return true;
+}
+
 function renderAlbumPage(payload) {
   const album = payload.albums.find((item) => item.id === state.route.albumId);
   if (!album) {
@@ -847,13 +982,16 @@ function renderSharePanel(payload) {
       ${
         canInvite
           ? `<div class="share-search">
-              <input
-                data-input="user-search"
-                value="${escapeAttr(state.userSearchQuery)}"
-                placeholder="Search users..."
-                autocomplete="off"
-                spellcheck="false"
-              />
+              ${renderSearchField({
+                search: 'user',
+                input: 'user-search',
+                value: state.userSearchQuery,
+                placeholder: 'Search users...',
+                label: 'Search users to invite',
+                clearLabel: 'Clear user search',
+                expanded: state.userSearchOpen,
+                controls: 'user-search-results'
+              })}
               <select data-change="share-role">
                 <option value="editor" ${state.shareRole === 'editor' ? 'selected' : ''}>Editor</option>
                 <option value="viewer" ${state.shareRole === 'viewer' ? 'selected' : ''}>Viewer</option>
@@ -870,12 +1008,13 @@ function renderSharePanel(payload) {
 }
 
 function renderUserResults(payload) {
-  if (state.userSearching) return `<div class="user-results"><div class="user-line muted">Searching.</div></div>`;
+  if (!state.userSearchOpen) return '';
+  if (state.userSearching) return `<div class="user-results" id="user-search-results" data-search-popup data-search-scope="user"><div class="user-line muted">Searching.</div></div>`;
   if (!state.userSearchQuery) return '';
-  if (!state.userResults.length) return `<div class="user-results"><div class="user-line muted">No users found.</div></div>`;
+  if (!state.userResults.length) return `<div class="user-results" id="user-search-results" data-search-popup data-search-scope="user"><div class="user-line muted">No users found.</div></div>`;
   const memberIds = new Set(payload.members.map((member) => member.userId));
   return `
-    <div class="user-results">
+    <div class="user-results" id="user-search-results" data-search-popup data-search-scope="user">
       ${state.userResults
         .map((user) => {
           const alreadyMember = memberIds.has(user.id);
@@ -930,27 +1069,29 @@ function renderAlbumSearch({ guest, payload }) {
   if (!guest && !payload.permissions.canEdit) return '';
   return `
     <form class="search-wrap" data-form="${guest ? 'guest-album' : 'album'}">
-      <div class="search-field">
-        <input
-          name="album"
-          data-input="album-search"
-          value="${escapeAttr(state.albumQuery)}"
-          placeholder="Add an album..."
-          autocomplete="off"
-          spellcheck="false"
-        />
-        ${renderSuggestions()}
-      </div>
+      ${renderSearchField({
+        search: 'album',
+        input: 'album-search',
+        name: 'album',
+        value: state.albumQuery,
+        placeholder: 'Add an album...',
+        label: 'Search albums to add',
+        clearLabel: 'Clear album search',
+        expanded: state.albumSearchOpen,
+        controls: 'album-search-results',
+        after: renderSuggestions()
+      })}
     </form>
   `;
 }
 
 function renderSuggestions() {
-  if (state.searching) return `<div class="suggestions"><div class="suggestion-empty">Searching.</div></div>`;
+  if (!state.albumSearchOpen) return '';
+  if (state.searching) return `<div class="suggestions" id="album-search-results" data-search-popup><div class="suggestion-empty">Searching.</div></div>`;
   if (!state.albumQuery || state.albumQuery.length < 2) return '';
-  if (!state.suggestions.length) return `<div class="suggestions"><div class="suggestion-empty">No albums found.</div></div>`;
+  if (!state.suggestions.length) return `<div class="suggestions" id="album-search-results" data-search-popup><div class="suggestion-empty">No albums found.</div></div>`;
   return `
-    <div class="suggestions">
+    <div class="suggestions" id="album-search-results" data-search-popup>
       ${state.suggestions
         .map(
           (album) => `
@@ -1110,6 +1251,31 @@ function platformButton(value, label, selected) {
   return `<button class="${selected === value ? 'active' : ''}" data-action="platform-set" data-platform="${value}" type="button">${label}</button>`;
 }
 
+function renderSearchField({ search, input, value, placeholder, label, clearLabel, name = '', expanded = false, controls = '', after = '' }) {
+  const hasValue = String(value || '').length > 0;
+  const controlAttrs = controls ? ` aria-controls="${escapeAttr(controls)}" aria-expanded="${expanded ? 'true' : 'false'}"` : '';
+  return `
+    <div class="search-field ${hasValue ? 'has-clear' : ''}" data-search-scope="${escapeAttr(search)}">
+      <input
+        ${name ? `name="${escapeAttr(name)}"` : ''}
+        type="search"
+        data-input="${escapeAttr(input)}"
+        value="${escapeAttr(value)}"
+        placeholder="${escapeAttr(placeholder)}"
+        aria-label="${escapeAttr(label)}"
+        autocomplete="off"
+        spellcheck="false"
+        ${controlAttrs}
+      />
+      ${hasValue ? renderActionButton('clear-search', 'x', clearLabel, {
+        className: 'search-clear',
+        attrs: `data-search="${escapeAttr(search)}"`
+      }) : ''}
+      ${after}
+    </div>
+  `;
+}
+
 function renderActionButton(action, iconName, label, options = {}) {
   const active = options.active ? ' active' : '';
   const className = `${options.className || 'text-button'} icon-text-button${active}`;
@@ -1130,6 +1296,8 @@ function iconSvg(name) {
     copy: '<rect x="8" y="8" width="11" height="11" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v1"/>',
     dice: '<rect x="4" y="4" width="16" height="16" rx="3"/><circle cx="8.5" cy="8.5" r="1.2" fill="currentColor" stroke="none"/><circle cx="15.5" cy="8.5" r="1.2" fill="currentColor" stroke="none"/><circle cx="12" cy="12" r="1.2" fill="currentColor" stroke="none"/><circle cx="8.5" cy="15.5" r="1.2" fill="currentColor" stroke="none"/><circle cx="15.5" cy="15.5" r="1.2" fill="currentColor" stroke="none"/>',
     edit: '<path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5z"/>',
+    eye: '<path d="M2 12s3.5-6 10-6 10 6 10 6-3.5 6-10 6S2 12 2 12z"/><circle cx="12" cy="12" r="3"/>',
+    'eye-off': '<path d="M3 3l18 18"/><path d="M10.6 10.6A3 3 0 0 0 12 15a3 3 0 0 0 2.4-1.2"/><path d="M9.9 5.2A10.8 10.8 0 0 1 12 5c6.5 0 10 7 10 7a18.4 18.4 0 0 1-3.1 4.1"/><path d="M6.5 6.7C3.8 8.5 2 12 2 12s3.5 7 10 7a10.7 10.7 0 0 0 4.4-.9"/>',
     gear: '<path d="M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8z"/><path d="M12 2v3M12 19v3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M2 12h3M19 12h3M4.9 19.1 7 17M17 7l2.1-2.1"/>',
     headphones: '<path d="M4 14v-2a8 8 0 0 1 16 0v2"/><rect x="3" y="14" width="4" height="6" rx="2"/><rect x="17" y="14" width="4" height="6" rx="2"/>',
     image: '<rect x="3" y="5" width="18" height="14" rx="2"/><circle cx="8" cy="10" r="1.5"/><path d="m21 16-5-5L5 19"/>',
@@ -1421,11 +1589,16 @@ function renderAlbumRatingFallback(album, payload, averageToggle = '') {
 
 function renderTrack(track, album, payload) {
   const average = track.aggregate && track.aggregate.average !== null ? `${track.aggregate.average}/10` : '';
+  const excluded = Boolean(track.userRating && !track.userRating.includeInAverage);
   return `
     <div class="track-row">
-      <div>
-        <strong>${escapeHtml(track.position)}. ${escapeHtml(track.title)}</strong>
-        ${average ? `<span>${average}</span>` : ''}
+      <div class="track-head">
+        <div>
+          <strong>${escapeHtml(track.position)}. ${escapeHtml(track.title)}</strong>
+          ${average ? `<span>${average}</span>` : ''}
+          ${excluded ? '<span>Excluded from your average</span>' : ''}
+        </div>
+        ${payload.permissions.canRate ? renderTrackAverageToggle(track, album) : ''}
       </div>
       ${
         payload.permissions.canRate
@@ -1439,6 +1612,15 @@ function renderTrack(track, album, payload) {
       }
     </div>
   `;
+}
+
+function renderTrackAverageToggle(track, album) {
+  const hasRating = Boolean(track.userRating);
+  const included = !track.userRating || track.userRating.includeInAverage;
+  return renderActionButton('track-average-toggle', included ? 'eye' : 'eye-off', hasRating ? (included ? 'Exclude from average' : 'Include in average') : 'Rate first', {
+    className: `icon-button track-average-toggle ${included ? '' : 'excluded'}`,
+    attrs: `data-album-id="${album.id}" data-track-id="${track.id}"${hasRating ? '' : ' disabled'}`
+  });
 }
 
 function renderCompletion(album, payload) {
@@ -1538,6 +1720,143 @@ function normalizeAlbumText(value) {
     .replace(/[^a-z0-9]+/g, ' ')
     .trim()
     .replace(/\s+/g, ' ');
+}
+
+function activeInputName() {
+  return document.activeElement?.dataset?.input || '';
+}
+
+function searchFocusOptions(search) {
+  if (search === 'album') return { focusSearch: true };
+  if (search === 'user') return { focusUserSearch: true };
+  if (search === 'profile') return { focusProfileSearch: true };
+  return {};
+}
+
+function searchValue(search) {
+  if (search === 'album') return state.albumQuery;
+  if (search === 'user') return state.userSearchQuery;
+  if (search === 'profile') return state.profileQuery;
+  return '';
+}
+
+function isSearchOpen(search) {
+  if (search === 'album') return state.albumSearchOpen;
+  if (search === 'user') return state.userSearchOpen;
+  return false;
+}
+
+function clearSearch(search) {
+  if (search === 'album') {
+    window.clearTimeout(albumSearchTimer);
+    albumSearchController?.abort();
+    albumSearchController = null;
+    albumSearchNonce += 1;
+    state.albumQuery = '';
+    state.albumSearchOpen = false;
+    state.suggestions = [];
+    state.selectedAlbum = null;
+    state.searching = false;
+    return true;
+  }
+  if (search === 'user') {
+    window.clearTimeout(userSearchTimer);
+    userSearchController?.abort();
+    userSearchController = null;
+    userSearchNonce += 1;
+    state.userSearchQuery = '';
+    state.userSearchOpen = false;
+    state.userResults = [];
+    state.userSearching = false;
+    return true;
+  }
+  if (search === 'profile') {
+    state.profileQuery = '';
+    return true;
+  }
+  return false;
+}
+
+function dismissSearch(search) {
+  if (search === 'album' && state.albumSearchOpen) {
+    state.albumSearchOpen = false;
+    return true;
+  }
+  if (search === 'user' && state.userSearchOpen) {
+    state.userSearchOpen = false;
+    return true;
+  }
+  return false;
+}
+
+function dismissOpenSearches() {
+  return [dismissSearch('album'), dismissSearch('user')].some(Boolean);
+}
+
+function hideSearchPopups() {
+  for (const popup of app.querySelectorAll('[data-search-popup]')) popup.remove();
+  for (const input of app.querySelectorAll('[aria-expanded="true"]')) input.setAttribute('aria-expanded', 'false');
+}
+
+function dismissOtherSearches(activeSearch) {
+  return ['album', 'user'].filter((search) => search !== activeSearch).map(dismissSearch).some(Boolean);
+}
+
+function handleInputKeydown(target, event) {
+  const search = inputSearchName(target.dataset.input);
+  if (!search) return;
+  if (search === 'album' && (event.key === 'ArrowDown' || event.key === 'ArrowUp')) {
+    if (!moveAlbumSuggestion(event.key === 'ArrowDown' ? 1 : -1)) return;
+    event.preventDefault();
+    render(searchFocusOptions(search));
+    return;
+  }
+  if (event.key !== 'Escape') return;
+  if (isSearchOpen(search)) {
+    dismissSearch(search);
+    event.preventDefault();
+    render(searchFocusOptions(search));
+    return;
+  }
+  if (searchValue(search)) {
+    clearSearch(search);
+    event.preventDefault();
+    render(searchFocusOptions(search));
+  }
+}
+
+function moveAlbumSuggestion(direction) {
+  if (!state.suggestions.length || state.albumQuery.trim().length < 2) return false;
+  state.albumSearchOpen = true;
+  const currentIndex = state.suggestions.findIndex((album) => album.providerId === state.selectedAlbum?.providerId);
+  const nextIndex =
+    currentIndex === -1
+      ? direction > 0
+        ? 0
+        : state.suggestions.length - 1
+      : (currentIndex + direction + state.suggestions.length) % state.suggestions.length;
+  state.selectedAlbum = state.suggestions[nextIndex];
+  return true;
+}
+
+function handleInputFocus(target) {
+  const search = inputSearchName(target.dataset.input);
+  if (!search) return;
+  const dismissedOther = dismissOtherSearches(search);
+  if (search === 'profile' || isSearchOpen(search) || !searchValue(search).trim()) {
+    if (dismissedOther) render(searchFocusOptions(search));
+    return;
+  }
+  if (search === 'album' && state.albumQuery.trim().length < 2) return;
+  state[search === 'album' ? 'albumSearchOpen' : 'userSearchOpen'] = true;
+  render(searchFocusOptions(search));
+}
+
+function inputSearchName(input) {
+  if (input === 'album-search') return 'album';
+  if (input === 'user-search') return 'user';
+  if (input === 'profile-search') return 'profile';
+  return '';
 }
 
 function clientAlbumKey(title, artist) {
@@ -1641,9 +1960,12 @@ async function togglePickerAlbumForList(listId) {
   });
   state.listPicker.addedListIds.add(String(targetList.id));
   state.notice = result.copied ? `Added to ${targetList.name}.` : `Already in ${targetList.name}.`;
-  await refreshMe();
-  if (state.payload?.list?.id === targetList.id) setCurrentPayload(payloadFromResponse(result));
-  return render();
+  if (state.payload?.list?.id === targetList.id) applyMutationResponse(result);
+  render();
+  refreshMe()
+    .then(() => render())
+    .catch(() => {});
+  return;
 }
 
 async function removePickerAlbumFromList(listId) {
@@ -1674,9 +1996,12 @@ async function removePickerAlbumFromList(listId) {
     state.listPicker.addedListIds.delete(String(targetList.id));
     state.notice = `Not in ${targetList.name}.`;
   }
-  await refreshMe();
-  if (state.payload?.list?.id === targetList.id) setCurrentPayload(payloadFromResponse(result));
-  return render();
+  if (state.payload?.list?.id === targetList.id) applyMutationResponse(result);
+  render();
+  refreshMe()
+    .then(() => render())
+    .catch(() => {});
+  return;
 }
 
 function exploreAlbumFromTarget(target) {
@@ -1708,6 +2033,181 @@ function payloadFromResponse(data) {
   if (data.permissions && data.albums) return data;
   if (data.list?.permissions && data.list?.albums) return data.list;
   return null;
+}
+
+function cloneData(value) {
+  if (typeof structuredClone === 'function') return structuredClone(value);
+  return JSON.parse(JSON.stringify(value));
+}
+
+function compareAlbums(left, right) {
+  return (
+    Number(left.sortOrder || 0) - Number(right.sortOrder || 0) ||
+    String(left.createdAt || '').localeCompare(String(right.createdAt || '')) ||
+    Number(left.id || 0) - Number(right.id || 0)
+  );
+}
+
+function patchCurrentPayload(mutator) {
+  if (!state.payload) return false;
+  const next = cloneData(state.payload);
+  if (mutator(next) === false) return false;
+  next.albums = [...(next.albums || [])].sort(compareAlbums);
+  setCurrentPayload(next);
+  return true;
+}
+
+function applyMutationResponse(data) {
+  const payload = payloadFromResponse(data);
+  if (payload) {
+    setCurrentPayload(payload);
+    return true;
+  }
+  if (!state.payload || !data || typeof data !== 'object') return false;
+  return patchCurrentPayload((next) => {
+    let changed = false;
+    if (data.revision) {
+      next.revision = data.revision;
+      changed = true;
+    }
+    if (data.list && !data.list.permissions) {
+      next.list = { ...next.list, ...data.list };
+      changed = true;
+    }
+    if (data.removedAlbumId !== undefined && data.removedAlbumId !== null) {
+      const albumId = Number(data.removedAlbumId);
+      const remaining = next.albums.filter((album) => album.id !== albumId);
+      if (remaining.length !== next.albums.length) {
+        next.albums = remaining;
+        changed = true;
+      }
+    }
+    if (data.album) {
+      const index = next.albums.findIndex((album) => album.id === data.album.id);
+      if (index === -1) next.albums.unshift(data.album);
+      else next.albums[index] = data.album;
+      changed = true;
+    }
+    if (Array.isArray(data.messages)) {
+      next.messages = data.messages;
+      changed = true;
+    }
+    return changed;
+  });
+}
+
+async function runPayloadMutation(request, optimisticMutator = null) {
+  const previous = state.payload ? cloneData(state.payload) : null;
+  if (optimisticMutator && patchCurrentPayload(optimisticMutator)) {
+    render();
+  }
+  try {
+    const data = await request();
+    if (applyMutationResponse(data)) render();
+    return data;
+  } catch (error) {
+    if (previous) {
+      setCurrentPayload(previous);
+      render();
+    }
+    throw error;
+  }
+}
+
+function currentUserMember(payload) {
+  if (!state.user) return null;
+  return (
+    payload.members.find((member) => member.userId === state.user.id) || {
+      userId: state.user.id,
+      username: state.user.username,
+      avatarColor: state.user.avatarColor,
+      avatarUrl: state.user.avatarUrl,
+      role: payload.permissions?.isMember ? 'editor' : null
+    }
+  );
+}
+
+function setAlbumCompletionState(album, payload, completed, updatedAt = new Date().toISOString()) {
+  if (!state.user) return false;
+  const member = currentUserMember(payload);
+  if (!member) return false;
+  const index = album.completions.findIndex((item) => item.userId === state.user.id);
+  if (completed) {
+    const nextCompletion = {
+      userId: state.user.id,
+      username: member.username,
+      avatarColor: member.avatarColor,
+      avatarUrl: member.avatarUrl,
+      completedAt: updatedAt
+    };
+    if (index === -1) album.completions.unshift(nextCompletion);
+    else album.completions[index] = nextCompletion;
+  } else if (index !== -1) {
+    album.completions.splice(index, 1);
+  }
+  album.completions.sort((left, right) => String(right.completedAt || '').localeCompare(String(left.completedAt || '')));
+  const completedIds = new Set(album.completions.map((item) => item.userId));
+  album.pendingMembers = payload.members.filter((item) => !completedIds.has(item.userId));
+  album.currentUserCompleted = completedIds.has(state.user.id);
+  return true;
+}
+
+function syncAlbumRatingRow(album, trackKey, trackTitle, rating, includeInAverage, updatedAt) {
+  if (!state.user || !Array.isArray(album.ratingsByUser)) return;
+  const nextRow = {
+    userId: state.user.id,
+    username: state.user.username,
+    avatarColor: state.user.avatarColor,
+    avatarUrl: state.user.avatarUrl,
+    trackKey,
+    trackTitle,
+    rating,
+    includeInAverage,
+    updatedAt
+  };
+  const index = album.ratingsByUser.findIndex((item) => item.userId === state.user.id && item.trackKey === trackKey);
+  if (index === -1) album.ratingsByUser.push(nextRow);
+  else album.ratingsByUser[index] = nextRow;
+}
+
+function setTrackAveragePreference(album, trackId, includeInAverage) {
+  const track = album.tracks.find((item) => item.id === trackId);
+  if (!track?.userRating) return false;
+  const updatedAt = new Date().toISOString();
+  track.userRating.includeInAverage = includeInAverage;
+  track.userRating.updatedAt = updatedAt;
+  if (Array.isArray(album.ratingsByUser) && state.user) {
+    const ratingRow = album.ratingsByUser.find((item) => item.userId === state.user.id && item.trackKey === track.trackKey);
+    if (ratingRow) {
+      ratingRow.includeInAverage = includeInAverage;
+      ratingRow.updatedAt = updatedAt;
+    }
+  }
+  return true;
+}
+
+function setTrackRatingState(album, payload, trackId, rating) {
+  const track = album.tracks.find((item) => item.id === trackId);
+  if (!track) return false;
+  const updatedAt = new Date().toISOString();
+  const includeInAverage = track.userRating?.includeInAverage ?? true;
+  track.userRating = { rating, includeInAverage, updatedAt };
+  syncAlbumRatingRow(album, track.trackKey, track.title, rating, includeInAverage, updatedAt);
+  if (album.tracks.length && album.tracks.every((item) => Boolean(item.userRating))) {
+    setAlbumCompletionState(album, payload, true, updatedAt);
+  }
+  return true;
+}
+
+function setAlbumRatingState(album, payload, rating) {
+  const updatedAt = new Date().toISOString();
+  const includeInAverage = album.currentUserAlbumRating?.includeInAverage ?? true;
+  album.currentUserAlbumRating = { rating, includeInAverage, updatedAt };
+  syncAlbumRatingRow(album, '__album__', 'Album rating', rating, includeInAverage, updatedAt);
+  if (!album.tracks.length) {
+    setAlbumCompletionState(album, payload, true, updatedAt);
+  }
+  return true;
 }
 
 function latestMessageId(payload) {
@@ -1796,57 +2296,88 @@ async function handleInput(target) {
   }
 
   if (target.dataset.input === 'user-search') {
+    dismissOtherSearches('user');
     state.userSearchQuery = target.value;
-    window.clearTimeout(searchTimer);
+    state.userSearchOpen = true;
+    window.clearTimeout(userSearchTimer);
+    userSearchController?.abort();
     if (state.userSearchQuery.trim().length < 1) {
       state.userResults = [];
       state.userSearching = false;
+      state.userSearchOpen = false;
       render({ focusUserSearch: true });
       return;
     }
-    const nonce = ++searchNonce;
+    const nonce = ++userSearchNonce;
     state.userSearching = true;
-    searchTimer = window.setTimeout(async () => {
+    render({ focusUserSearch: true });
+    userSearchTimer = window.setTimeout(async () => {
+      userSearchController = new AbortController();
       try {
-        const data = await api(`/api/users?q=${encodeURIComponent(state.userSearchQuery.trim())}`);
-        if (nonce !== searchNonce) return;
+        const data = await api(`/api/users?q=${encodeURIComponent(state.userSearchQuery.trim())}`, {
+          signal: userSearchController.signal
+        });
+        if (nonce !== userSearchNonce) return;
         state.userResults = data.users || [];
         state.userSearching = false;
-        render({ focusUserSearch: true });
+        if (state.userSearchOpen || activeInputName() === 'user-search') {
+          render({ focusUserSearch: activeInputName() === 'user-search' });
+        }
       } catch (error) {
-        if (nonce !== searchNonce) return;
+        if (error.name === 'AbortError' || nonce !== userSearchNonce) return;
         state.userResults = [];
         state.userSearching = false;
         showError(error);
+      } finally {
+        if (nonce === userSearchNonce) userSearchController = null;
       }
     }, 200);
     return;
   }
 
+  if (target.dataset.input === 'profile-search') {
+    dismissOtherSearches('profile');
+    state.profileQuery = target.value;
+    render({ focusProfileSearch: true });
+    return;
+  }
+
   if (target.dataset.input !== 'album-search') return;
+  dismissOtherSearches('album');
   state.albumQuery = target.value;
+  state.albumSearchOpen = true;
   state.selectedAlbum = null;
-  window.clearTimeout(searchTimer);
+  window.clearTimeout(albumSearchTimer);
+  albumSearchController?.abort();
   if (state.albumQuery.trim().length < 2) {
     state.suggestions = [];
     state.searching = false;
+    state.albumSearchOpen = false;
     render({ focusSearch: true });
     return;
   }
-  const nonce = ++searchNonce;
+  const nonce = ++albumSearchNonce;
   state.searching = true;
-  searchTimer = window.setTimeout(async () => {
+  render({ focusSearch: true });
+  albumSearchTimer = window.setTimeout(async () => {
+    albumSearchController = new AbortController();
     try {
-      const data = await api(`/api/albums/search?q=${encodeURIComponent(state.albumQuery.trim())}`);
-      if (nonce !== searchNonce) return;
+      const data = await api(`/api/albums/search?q=${encodeURIComponent(state.albumQuery.trim())}`, {
+        signal: albumSearchController.signal
+      });
+      if (nonce !== albumSearchNonce) return;
       state.suggestions = data.results || [];
       state.searching = false;
-      render({ focusSearch: true });
+      if (state.albumSearchOpen || activeInputName() === 'album-search') {
+        render({ focusSearch: activeInputName() === 'album-search' });
+      }
     } catch (error) {
-      if (nonce !== searchNonce) return;
+      if (error.name === 'AbortError' || nonce !== albumSearchNonce) return;
       state.suggestions = [];
       state.searching = false;
       showError(error);
+    } finally {
+      if (nonce === albumSearchNonce) albumSearchController = null;
     }
   }, 450);
 }
@@ -1870,6 +2401,11 @@ async function handleAction(target) {
     state.notice = '';
     state.error = '';
     return render();
+  }
+  if (action === 'clear-search') {
+    const search = target.dataset.search;
+    clearSearch(search);
+    return render(searchFocusOptions(search));
   }
   if (action === 'theme-cycle') return setTheme(nextTheme());
   if (action === 'theme-set') return setTheme(target.dataset.theme);
@@ -1978,7 +2514,9 @@ async function handleAction(target) {
     });
     state.notice = `Invite sent to ${target.dataset.username}.`;
     state.userSearchQuery = '';
+    state.userSearchOpen = false;
     state.userResults = [];
+    state.userSearching = false;
     return render();
   }
   if (action === 'remove-member') {
@@ -2072,21 +2610,52 @@ async function handleAction(target) {
   }
   if (action === 'complete') {
     const album = state.payload.albums.find((item) => item.id === Number(target.dataset.id));
-    const data = await api(`/api/lists/${state.payload.list.id}/albums/${album.id}/complete`, {
-      method: 'POST',
-      body: { completed: !album.currentUserCompleted }
-    });
-    setCurrentPayload(payloadFromResponse(data));
-    return render();
+    await runPayloadMutation(
+      () =>
+        api(`/api/lists/${state.payload.list.id}/albums/${album.id}/complete`, {
+          method: 'POST',
+          body: { completed: !album.currentUserCompleted }
+        }),
+      (payload) => {
+        const nextAlbum = payload.albums.find((item) => item.id === album.id);
+        return nextAlbum ? setAlbumCompletionState(nextAlbum, payload, !album.currentUserCompleted) : false;
+      }
+    );
+    return;
   }
   if (action === 'average-opt') {
     const album = state.payload.albums.find((item) => item.id === Number(target.dataset.albumId));
-    const data = await api(`/api/lists/${state.payload.list.id}/albums/${album.id}/rating-preferences`, {
-      method: 'PATCH',
-      body: { includeInAverage: !album.currentUserAverageOptIn }
-    });
-    setCurrentPayload(payloadFromResponse(data));
-    return render();
+    await runPayloadMutation(
+      () =>
+        api(`/api/lists/${state.payload.list.id}/albums/${album.id}/rating-preferences`, {
+          method: 'PATCH',
+          body: { includeInAverage: !album.currentUserAverageOptIn }
+        }),
+      (payload) => {
+        const nextAlbum = payload.albums.find((item) => item.id === album.id);
+        if (!nextAlbum) return false;
+        nextAlbum.currentUserAverageOptIn = !album.currentUserAverageOptIn;
+        return true;
+      }
+    );
+    return;
+  }
+  if (action === 'track-average-toggle') {
+    const album = state.payload.albums.find((item) => item.id === Number(target.dataset.albumId));
+    const track = album?.tracks.find((item) => item.id === Number(target.dataset.trackId));
+    if (!album || !track?.userRating) throw new Error('Rate this track before excluding it from album ratings.');
+    await runPayloadMutation(
+      () =>
+        api(`/api/lists/${state.payload.list.id}/albums/${album.id}/tracks/${track.id}/rating-preferences`, {
+          method: 'PATCH',
+          body: { includeInAverage: !track.userRating.includeInAverage }
+        }),
+      (payload) => {
+        const nextAlbum = payload.albums.find((item) => item.id === album.id);
+        return nextAlbum ? setTrackAveragePreference(nextAlbum, track.id, !track.userRating.includeInAverage) : false;
+      }
+    );
+    return;
   }
   if (action === 'rate-profile-track') {
     state.profile = await api(
@@ -2102,24 +2671,62 @@ async function handleAction(target) {
     return render();
   }
   if (action === 'rate') {
-    const data = await api(`/api/lists/${state.payload.list.id}/albums/${target.dataset.albumId}/tracks/${target.dataset.trackId}/rating`, {
-      method: 'PUT',
-      body: { rating: Number(target.dataset.rating) }
-    });
-    setCurrentPayload(payloadFromResponse(data));
-    return render();
+    const albumId = Number(target.dataset.albumId);
+    const trackId = Number(target.dataset.trackId);
+    const rating = Number(target.dataset.rating);
+    await runPayloadMutation(
+      () =>
+        api(`/api/lists/${state.payload.list.id}/albums/${albumId}/tracks/${trackId}/rating`, {
+          method: 'PUT',
+          body: { rating }
+        }),
+      (payload) => {
+        const nextAlbum = payload.albums.find((item) => item.id === albumId);
+        return nextAlbum ? setTrackRatingState(nextAlbum, payload, trackId, rating) : false;
+      }
+    );
+    return;
   }
   if (action === 'rate-album') {
-    const data = await api(`/api/lists/${state.payload.list.id}/albums/${target.dataset.albumId}/rating`, {
-      method: 'PUT',
-      body: { rating: Number(target.dataset.rating) }
-    });
-    setCurrentPayload(payloadFromResponse(data));
-    return render();
+    const albumId = Number(target.dataset.albumId);
+    const rating = Number(target.dataset.rating);
+    await runPayloadMutation(
+      () =>
+        api(`/api/lists/${state.payload.list.id}/albums/${albumId}/rating`, {
+          method: 'PUT',
+          body: { rating }
+        }),
+      (payload) => {
+        const nextAlbum = payload.albums.find((item) => item.id === albumId);
+        return nextAlbum ? setAlbumRatingState(nextAlbum, payload, rating) : false;
+      }
+    );
+    return;
   }
   if (action === 'delete-album') {
-    const data = await api(`/api/lists/${state.payload.list.id}/albums/${target.dataset.id}`, { method: 'DELETE' });
-    setCurrentPayload(payloadFromResponse(data));
+    const albumId = Number(target.dataset.id);
+    const data = await runPayloadMutation(
+      () => api(`/api/lists/${state.payload.list.id}/albums/${albumId}`, { method: 'DELETE' }),
+      (payload) => {
+        const nextAlbum = payload.albums.find((item) => item.id === albumId);
+        if (!nextAlbum) return false;
+        if (payload.list.kind !== 'collab') {
+          payload.albums = payload.albums.filter((item) => item.id !== albumId);
+          payload.list.albumCount = Math.max(0, Number(payload.list.albumCount || 0) - 1);
+          return true;
+        }
+        if (nextAlbum.currentUserRemovalVoted) return true;
+        const nextVoteCount = Number(nextAlbum.removalVoteCount || 0) + 1;
+        if (nextVoteCount >= Number(nextAlbum.removalVoteThreshold || 1)) {
+          payload.albums = payload.albums.filter((item) => item.id !== albumId);
+          payload.list.albumCount = Math.max(0, Number(payload.list.albumCount || 0) - 1);
+          return true;
+        }
+        nextAlbum.currentUserRemovalVoted = true;
+        nextAlbum.removalVoteCount = nextVoteCount;
+        return true;
+      }
+    );
     if (state.payload?.list.kind === 'collab' && !data.removed) {
       state.notice = `Removal vote recorded (${data.voteCount}/${data.threshold}).`;
     }
@@ -2140,7 +2747,7 @@ async function handleAction(target) {
       method: 'POST',
       body: { force: true }
     });
-    setCurrentPayload(payloadFromResponse(data));
+    applyMutationResponse(data);
     state.notice = data.coverUrl ? 'Cover refreshed.' : 'Cover unavailable.';
     return render();
   }
@@ -2315,13 +2922,15 @@ async function autoAddAlbum(providerId) {
       body: album
     });
     if (data.copied === false) state.notice = 'Already in this list.';
-    setCurrentPayload(payloadFromResponse(data));
+    applyMutationResponse(data);
   } else {
     throw new Error('You do not have edit access to this list.');
   }
   state.albumQuery = '';
+  state.albumSearchOpen = false;
   state.suggestions = [];
   state.selectedAlbum = null;
+  state.searching = false;
   render({ focusSearch: true });
 }
 
@@ -2498,13 +3107,20 @@ async function syncCurrentPayload() {
   const routeSnapshot = { ...state.route };
   const activeInput = document.activeElement?.dataset?.input || '';
   try {
+    const params = new URLSearchParams();
+    if (state.payload.revision) params.set('revision', state.payload.revision);
+    const suffix = params.toString() ? `?${params.toString()}` : '';
     const data =
       routeSnapshot.type === 'share'
-        ? await api(`/api/share/${encodeURIComponent(routeSnapshot.token)}`)
-        : await api(`/api/lists/${state.payload.list.id}`);
+        ? await api(`/api/share/${encodeURIComponent(routeSnapshot.token)}${suffix}`)
+        : await api(`/api/lists/${state.payload.list.id}${suffix}`);
     if (routeSnapshot.type !== state.route.type) return;
     if (routeSnapshot.type === 'list' && routeSnapshot.id !== state.route.id) return;
     if (routeSnapshot.type === 'share' && routeSnapshot.token !== state.route.token) return;
+    if (data.notModified) {
+      state.payload.revision = data.revision || state.payload.revision;
+      return;
+    }
     if (JSON.stringify(data) === JSON.stringify(state.payload)) return;
     setCurrentPayload(data);
     render({
@@ -2591,7 +3207,8 @@ async function api(path, options = {}) {
     method: options.method || 'GET',
     credentials: 'same-origin',
     headers: options.body ? { 'Content-Type': 'application/json' } : {},
-    body: options.body ? JSON.stringify(options.body) : undefined
+    body: options.body ? JSON.stringify(options.body) : undefined,
+    signal: options.signal
   });
   const data = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(data?.error?.message || 'Request failed.');

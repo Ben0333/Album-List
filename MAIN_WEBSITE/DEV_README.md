@@ -19,7 +19,7 @@ Core rules:
 - Collaborative album removal requires votes from at least one quarter of members.
 - Collaborative members can leave shared lists; owners can remove non-owner members. Non-owners should only see a remove/leave control for themselves.
 - Ratings and shared listening state are logged-in features.
-- Track ratings are 0-10 and roll up to album averages when the user opts in.
+- Track ratings are 0-10 and roll up to album averages when the user opts in; individual track ratings can also be excluded from averages.
 - Ratings should be reusable across lists so users do not have to re-review the same album/tracks.
 - Listened/completed state should be treated as reusable per user/album, not only per list row.
 - Recommendations are currently a local algorithm, not LLM-based: use high ratings to find similar users and suggest unrated/unlisted albums, with explore-list fallback when rating data is thin.
@@ -30,21 +30,26 @@ Core rules:
 
 ## Architecture
 
-- `src/server.js`: Express app, auth/session helpers, REST routes, list/rating/history logic.
-- `src/explore-data.js`: static curated explore-list data. The `1001-all-editions` list mirrors `https://1001albumsgenerator.com/albums` as of April 28, 2026 and currently contains 1,088 albums across editions plus Spotify album IDs for cover hydration.
-- `src/db.js`: SQLite connection, schema, normalization helpers, transaction helper.
-- `src/config.js`: environment config.
-- `public/index.html`: app root.
-- `public/app.js`: vanilla JS client/router/state/rendering.
-- `public/styles.css`: responsive UI and themes.
+- `apps/main/src/server.js`: public Express app, auth/session helpers, REST routes, list/rating/history logic.
+- `apps/main/src/explore-data.js`: static curated explore-list data. The `1001-all-editions` list mirrors `https://1001albumsgenerator.com/albums` as of April 28, 2026 and currently contains 1,088 albums across editions plus Spotify album IDs for cover hydration.
+- `apps/main/public/index.html`: public app root.
+- `apps/main/public/app.js`: vanilla JS client/router/state/rendering.
+- `apps/main/public/styles.css`: responsive UI and themes.
+- `apps/admin/src/server.js`: local-only admin Express app for stats, account disabling, and account anonymization.
+- `apps/admin/public/`: local admin dashboard UI.
+- `packages/shared/src/db.js`: SQLite connection, schema, normalization helpers, transaction helper.
+- `packages/shared/src/config.js`: shared environment config.
 - `data/albums.sqlite`: local database, ignored by git.
-- `Start Albums App.bat` / `Stop Albums App.bat`: Windows one-click local server controls that use `.server.pid`.
+- `../Start Albums App.bat` / `../Stop Albums App.bat`: Windows one-click main server controls that use `.server.pid`.
+- `../Start Albums Admin.bat` / `../Stop Albums Admin.bat`: Windows one-click local admin controls that use `.admin.pid`.
+- `../Start Cloudflare Tunnel.bat` / `../Stop Cloudflare Tunnel.bat`: Windows Cloudflared service controls that use `scripts/cloudflare-tunnel-control.ps1`.
 
 There is no frontend build pipeline. Keep it that way unless there is a clear reason to add one.
 
 ## Security and Deployment Notes
 
-- Production startup validation lives in `src/config.js`. With `NODE_ENV=production`, the app requires a public `https://` `APP_ORIGIN`, `COOKIE_SECURE=true`, and an explicit persistent `DATABASE_PATH`.
+- Production startup validation lives in `packages/shared/src/config.js`. With `NODE_ENV=production`, the public app requires a public `https://` `APP_ORIGIN`, `COOKIE_SECURE=true`, and an explicit persistent `DATABASE_PATH`.
+- The admin app binds to `ADMIN_HOST` and defaults to `127.0.0.1`. Keep it local-only; do not put it behind a public reverse proxy.
 - Session cookies are HTTP-only, same-site `lax`, and secure when `COOKIE_SECURE=true`.
 - Mutating `/api` requests are same-origin protected with `Origin` and Fetch Metadata checks. Keep new write endpoints under `/api` so this middleware applies.
 - `helmet` sets security headers and CSP. Current CSP allows same-origin scripts/connections/styles, inline styles for the existing vanilla UI, and images from `self`, `data:`, and `https:`.
@@ -59,7 +64,7 @@ Node's built-in `node:sqlite` is used to avoid native npm SQLite packages. This 
 
 Important tables:
 
-- `users`: account, theme, history sharing, avatar color.
+- `users`: account, theme, history sharing, avatar color, disabled/anonymized markers.
 - `users.avatar_data_url`: small uploaded profile image stored as a data URL.
 - `users.music_platform`: preferred external music service; `na` maps to YouTube Music links.
 - `users.accent_color`: optional custom hex accent override; empty means derive from music platform.
@@ -76,6 +81,7 @@ Important tables:
 - `album_average_opt_in`: user-level opt-in/out for aggregate album averages.
 - `user_album_activity`: profile/history activity that survives list entry deletion.
 - `explore_album_covers`: persistent on-demand cache for explore cover URLs.
+- `admin_action_log`: local admin disable/enable/anonymize action history.
 
 Do not store plaintext passwords. Do not move sessions to localStorage.
 
@@ -118,9 +124,26 @@ Useful flows:
 - `PUT /api/lists/:id/albums/:albumId/rating` for album-level fallback ratings when track metadata is unavailable
 - `POST /api/lists/:id/albums/:albumId/complete`
 - `PUT /api/lists/:id/albums/:albumId/tracks/:trackId/rating`
+- `PATCH /api/lists/:id/albums/:albumId/tracks/:trackId/rating-preferences`
 - `PUT /api/me/albums/:albumKey/ratings/:trackKey` for editing existing ratings from the signed-in user's profile album page
 - `GET /api/users/:username`
 - `GET /api/history/:token`
+
+The admin app has its own local-only `/api` surface under port `ADMIN_PORT`, including:
+
+- `GET /api/site/status`
+- `POST /api/site/start`
+- `POST /api/site/stop`
+- `POST /api/site/restart`
+- `GET /api/tunnel/status`
+- `POST /api/tunnel/start`
+- `POST /api/tunnel/stop`
+- `POST /api/lockdown`
+- `GET /api/stats`
+- `GET /api/accounts`
+- `POST /api/accounts/:id/disable`
+- `POST /api/accounts/:id/enable`
+- `POST /api/accounts/:id/anonymize`
 
 ## UI Rules
 
@@ -169,6 +192,7 @@ Maintain:
 
 - Add additional metadata providers for external links through Spotify, YouTube, or other APIs.
 - Current metadata lookup uses cached Apple iTunes Search/Lookup API calls plus MusicBrainz release search through `/api/albums/search` and `/api/albums/lookup/:providerId`.
+- iTunes lookup may overlay matching Japanese storefront track titles for native-script display while preserving the original lookup title as the rating key source.
 - MusicBrainz search handles mixed `album artist` and `artist album` queries by generating release/artist field clauses, includes Albums and EPs, and runs through a one-at-a-time request queue to stay within the public API guidance.
 - MusicBrainz fallback IDs use `mb:<releaseId>`. Keep lookup support for these provider IDs.
 - Add ownership transfer for collaborative lists.
@@ -177,7 +201,7 @@ Maintain:
 - Add richer profile pages.
 - Add a small refresh script if the 1001 snapshot needs routine updates.
 - Add password reset once email sending exists.
-- Add admin moderation tools before broad public launch.
+- Keep the admin dashboard local-only; add stronger authentication before any future remote exposure.
 
 ## Verification Used
 
@@ -196,6 +220,7 @@ The current implementation was smoke-tested with:
 Run syntax checks with:
 
 ```powershell
+cd MAIN_WEBSITE
 npm run check
 npm run audit
 ```

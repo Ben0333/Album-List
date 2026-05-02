@@ -407,8 +407,48 @@ h1 {
   width: 100%;
   min-height: 38px;
   padding: 0 13px;
-  background: var(--panel);
+  background: color-mix(in srgb, var(--panel) 88%, transparent);
   color: var(--text);
+  backdrop-filter: blur(12px) saturate(1.08);
+}
+
+.search-field.has-clear input {
+  padding-right: 42px;
+}
+
+.search-field input[type="search"] {
+  -webkit-appearance: none;
+  appearance: textfield;
+}
+
+.search-field input[type="search"]::-webkit-search-cancel-button,
+.search-field input[type="search"]::-webkit-search-decoration {
+  -webkit-appearance: none;
+  appearance: none;
+}
+
+.search-clear {
+  position: absolute;
+  top: 50%;
+  right: 6px;
+  width: 28px;
+  min-height: 28px;
+  padding: 0;
+  transform: translateY(-50%);
+  border-color: transparent;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--muted);
+}
+
+.search-clear:hover:not(:disabled) {
+  transform: translateY(-50%);
+  color: var(--text);
+  background: var(--panel-2);
+}
+
+.search-clear:active:not(:disabled) {
+  transform: translateY(-50%) scale(0.96);
 }
 
 .suggestions {
@@ -420,8 +460,9 @@ h1 {
   overflow: hidden;
   border: 1px solid var(--line);
   border-radius: var(--radius);
-  background: var(--panel);
+  background: color-mix(in srgb, var(--panel) 78%, transparent);
   box-shadow: var(--shadow);
+  backdrop-filter: blur(18px) saturate(1.2);
   animation: rise-in 150ms ease both;
 }
 
@@ -437,12 +478,12 @@ h1 {
   border: 0;
   border-radius: 0;
   text-align: left;
-  background: var(--panel);
+  background: color-mix(in srgb, var(--panel) 70%, transparent);
 }
 
 .suggestion:hover,
 .suggestion.selected {
-  background: var(--panel-2);
+  background: color-mix(in srgb, var(--panel-2) 76%, var(--blue) 12%);
 }
 
 .suggestion strong,
@@ -665,6 +706,34 @@ h1 {
   overflow-wrap: anywhere;
 }
 
+.track-head {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 10px;
+}
+
+.track-head > div {
+  min-width: 0;
+}
+
+.track-average-toggle {
+  width: 30px;
+  min-height: 30px;
+  color: var(--muted);
+}
+
+.track-average-toggle.excluded {
+  color: var(--blue-strong);
+  border-color: var(--blue);
+  background: var(--panel-2);
+}
+
+.track-average-toggle:disabled {
+  opacity: 0.38;
+  cursor: not-allowed;
+}
+
 .album-rating-panel {
   display: grid;
   gap: 8px;
@@ -839,6 +908,14 @@ h1 {
   gap: 6px;
 }
 
+.user-results {
+  padding: 6px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: color-mix(in srgb, var(--panel) 78%, transparent);
+  backdrop-filter: blur(18px) saturate(1.2);
+}
+
 .user-line {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) auto auto;
@@ -847,7 +924,7 @@ h1 {
   min-height: 40px;
   padding: 6px;
   border-radius: var(--radius);
-  background: var(--panel-2);
+  background: color-mix(in srgb, var(--panel-2) 84%, transparent);
 }
 
 .user-line.muted,
@@ -1107,6 +1184,10 @@ label span {
 .profile-section h2 {
   margin: 0;
   font-size: 1rem;
+}
+
+.profile-search {
+  margin-bottom: 2px;
 }
 
 .album-item.common {
