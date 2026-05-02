@@ -9,6 +9,7 @@
   import ToastNotice from './components/ToastNotice.svelte';
   import Login from './routes/Login.svelte';
   import Home from './routes/Home.svelte';
+  import ListPage from './routes/ListPage.svelte';
   import Placeholder from './routes/Placeholder.svelte';
 
   let booted = $state<boolean>(false);
@@ -58,7 +59,7 @@
   {:else if router.current.type === 'home'}
     <Home />
   {:else if router.current.type === 'list'}
-    <Placeholder title="List" note="List view port pending." />
+    <ListPage />
   {:else if router.current.type === 'share'}
     <Placeholder title="Shared list" note="Shared-list view port pending." />
   {:else if router.current.type === 'invite'}
