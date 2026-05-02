@@ -8,18 +8,18 @@ import bcrypt from 'bcryptjs';
 import compression from 'compression';
 import express from 'express';
 import helmet from 'helmet';
-import { closeDatabase, db, normalizeText, nowIso, transaction } from '#shared/db.js';
-import { config } from '#shared/config.js';
+import { closeDatabase, db, normalizeText, nowIso, transaction } from '@albums/shared/db';
+import { config } from '@albums/shared/config';
 
 const execFileAsync = promisify(execFile);
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const publicDir = path.join(__dirname, '..', 'public');
-const projectRoot = path.resolve(__dirname, '..', '..', '..');
-const mainServerScript = path.join(projectRoot, 'apps', 'main', 'src', 'server.js');
-const mainPidFile = path.join(projectRoot, '.server.pid');
+const repoRoot = path.resolve(__dirname, '..', '..');
+const mainServerScript = path.join(repoRoot, 'server', 'src', 'server.js');
+const mainPidFile = path.join(repoRoot, '.server.pid');
 const mainHealthUrl = `http://localhost:${config.port}/api/health`;
-const tunnelControlScript = path.join(projectRoot, 'scripts', 'cloudflare-tunnel-control.ps1');
+const tunnelControlScript = path.join(repoRoot, 'admin', 'scripts', 'cloudflare-tunnel-control.ps1');
 const app = express();
 
 app.disable('x-powered-by');

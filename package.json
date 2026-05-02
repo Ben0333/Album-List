@@ -1,12 +1,30 @@
 {
-  "name": "albums-to-listen-to-wrapper",
+  "name": "albums-to-listen-to",
+  "version": "0.1.0",
   "private": true,
+  "type": "module",
+  "description": "Album list web app with accounts, sharing, collaboration, and ratings.",
+  "workspaces": [
+    "server",
+    "web",
+    "shared",
+    "admin"
+  ],
   "scripts": {
-    "start": "npm --prefix MAIN_WEBSITE start",
-    "dev": "npm --prefix MAIN_WEBSITE run dev",
-    "admin": "npm --prefix MAIN_WEBSITE run admin",
-    "admin:dev": "npm --prefix MAIN_WEBSITE run admin:dev",
-    "check": "npm --prefix MAIN_WEBSITE run check",
-    "audit": "npm --prefix MAIN_WEBSITE run audit"
+    "dev": "concurrently -n server,web -c blue,green \"npm run dev -w @albums/server\" \"npm run dev -w @albums/web\"",
+    "dev:legacy": "LEGACY_FRONTEND=1 npm run dev -w @albums/server",
+    "dev:server": "npm run dev -w @albums/server",
+    "dev:web": "npm run dev -w @albums/web",
+    "dev:admin": "npm run dev -w @albums/admin",
+    "build": "npm run build -w @albums/web",
+    "start": "npm run start -w @albums/server",
+    "check": "npm run check -w @albums/server && npm run check -w @albums/web",
+    "audit": "npm audit --omit=dev"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.0"
+  },
+  "engines": {
+    "node": ">=22"
   }
 }

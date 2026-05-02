@@ -9,3 +9,6 @@ npm-debug.log*
 **/.server.pid
 **/.admin.pid
 *.bat
+web/dist
+.vite
+*.tsbuildinfo

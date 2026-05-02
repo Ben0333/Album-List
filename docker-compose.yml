@@ -1,0 +1,18 @@
+services:
+  app:
+    build: .
+    image: albums-app:local
+    container_name: albums-app
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      DATABASE_PATH: /data/albums.sqlite
+      # Override the rest from .env (APP_ORIGIN, COOKIE_SECURE, TRUST_PROXY, SESSION_DAYS)
+    env_file:
+      - path: .env
+        required: false
+    volumes:
+      - ./data:/data

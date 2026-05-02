@@ -2,33 +2,63 @@
 
 A small album-list web app with guest lists, username/email/password accounts, collaborative lists, share links, listening status, track ratings, album averages, and light/dark/late-90s themes.
 
-## Run Locally
+## Project Layout
 
-```powershell
-cd MAIN_WEBSITE
-npm install
-npm start
+```
+server/    Express JSON API + SQLite (Node 22, no build step)
+web/       Svelte 5 + Vite SPA frontend (TypeScript)
+shared/    Config and DB helpers (@albums/shared)
+admin/     Local-only admin dashboard (not part of the Docker image)
+data/      SQLite database (gitignored, mounted as a volume in Docker)
 ```
 
-Open http://localhost:3000.
+The repository is an npm workspaces monorepo. The Svelte port is in progress on
+`refactor/svelte`; the original vanilla-JS frontend is preserved at
+`server/legacy-public/` and is served automatically when `web/dist/` is missing
+or `LEGACY_FRONTEND=1` is set.
 
-From the original parent folder, you can also double-click `Start Albums App.bat` to start the main server and open the site, then double-click `Stop Albums App.bat` when you want to shut it down.
+## Run Locally
 
-For development:
-
-```powershell
+```sh
+npm install
 npm run dev
 ```
 
-For the local-only admin dashboard:
+Opens Vite at http://localhost:5173 (SPA in development) and the API at
+http://localhost:3000. Vite proxies `/api` to the API server.
 
-```powershell
-npm run admin
+To run against the legacy frontend (the original vanilla JS app) on a single port:
+
+```sh
+npm run dev:legacy   # serves the legacy UI at http://localhost:3000
 ```
 
-Open http://127.0.0.1:3001. The admin app binds to localhost by default and is separate from the public website.
+To produce a single-process production build:
 
-From the original parent folder, `Start Albums Admin.bat` and `Stop Albums Admin.bat` do the same for the local admin dashboard. `Start Cloudflare Tunnel.bat` and `Stop Cloudflare Tunnel.bat` control the installed Cloudflared Windows service.
+```sh
+npm run build
+npm start            # serves built SPA + API at http://localhost:3000
+```
+
+For the local-only admin dashboard at http://127.0.0.1:3001:
+
+```sh
+npm run dev:admin
+```
+
+The admin app binds to localhost only, can start/stop the public server, and is
+explicitly excluded from the Docker image.
+
+## Run with Docker
+
+```sh
+cp .env.example .env   # edit for production
+docker compose up --build
+```
+
+The compose file mounts `./data` to `/data` inside the container so the SQLite
+database persists across rebuilds. The image exposes port 3000 and includes a
+healthcheck against `/api/health`.
 
 ## Configuration
 

@@ -1,0 +1,13 @@
+{
+  "name": "@albums/shared",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    "./config": "./src/config.js",
+    "./db": "./src/db.js"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.7"
+  }
+}

@@ -1,17 +1,22 @@
 ﻿import crypto from 'node:crypto';
+import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import bcrypt from 'bcryptjs';
 import compression from 'compression';
 import express from 'express';
 import helmet from 'helmet';
-import { albumKey, closeDatabase, db, normalizeText, nowIso, trackKey, transaction } from '#shared/db.js';
-import { config } from '#shared/config.js';
+import { albumKey, closeDatabase, db, normalizeText, nowIso, trackKey, transaction } from '@albums/shared/db';
+import { config } from '@albums/shared/config';
 import { exploreLists } from './explore-data.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-const publicDir = path.join(__dirname, '..', 'public');
+const repoRoot = path.resolve(__dirname, '..', '..');
+const builtPublicDir = path.join(repoRoot, 'web', 'dist');
+const legacyPublicDir = path.join(repoRoot, 'server', 'legacy-public');
+const useLegacyFrontend = process.env.LEGACY_FRONTEND === '1' || !fs.existsSync(path.join(builtPublicDir, 'index.html'));
+const publicDir = useLegacyFrontend ? legacyPublicDir : builtPublicDir;
 const app = express();
 
 const avatarColors = ['#4f8cff', '#15b8a6', '#f59e0b', '#ef4444', '#8b5cf6', '#22c55e', '#f97316', '#06b6d4'];
@@ -3715,6 +3720,10 @@ app.get(
     res.json({ user: publicUser(owner), completions });
   })
 );
+
+app.use('/api', (req, res) => {
+  res.status(404).json({ error: { message: 'Not found.', status: 404 } });
+});
 
 app.get('*', (req, res) => {
   res.sendFile(path.join(publicDir, 'index.html'));
