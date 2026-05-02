@@ -9,6 +9,7 @@
   import ToastNotice from './components/ToastNotice.svelte';
   import SettingsModal from './components/SettingsModal.svelte';
   import ListPickerModal from './components/ListPickerModal.svelte';
+  import AvatarCropModal from './components/AvatarCropModal.svelte';
   import Login from './routes/Login.svelte';
   import Home from './routes/Home.svelte';
   import ListPage from './routes/ListPage.svelte';
@@ -97,5 +98,8 @@
   {/if}
   {#if appState.listPicker}
     <ListPickerModal onClose={() => (appState.listPicker = null)} />
+  {/if}
+  {#if appState.avatarCrop}
+    <AvatarCropModal onClose={() => (appState.avatarCrop = null)} />
   {/if}
 </div>
