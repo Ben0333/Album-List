@@ -34,6 +34,7 @@ export interface AppState {
   selectedPlatform: 'spotify' | 'youtube_music' | 'apple_music' | 'tidal' | 'soundcloud' | 'bandcamp' | 'deezer' | 'na';
   notice: string;
   error: string;
+  settingsOpen: boolean;
 }
 
 export const appState: AppState = $state({
@@ -45,7 +46,8 @@ export const appState: AppState = $state({
   authMode: 'login',
   selectedPlatform: 'na',
   notice: '',
-  error: ''
+  error: '',
+  settingsOpen: false
 });
 
 export function persistTheme(theme: ThemePreference): void {

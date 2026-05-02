@@ -5,6 +5,7 @@
   import type { ListPayload } from '$lib/types';
   import IconButton from '../components/IconButton.svelte';
   import AlbumRow from '../components/AlbumRow.svelte';
+  import AlbumSearch from '../components/AlbumSearch.svelte';
   import ListSwitcher from '../components/ListSwitcher.svelte';
   import Placeholder from './Placeholder.svelte';
 
@@ -74,6 +75,8 @@
           <IconButton icon="dice" label="Shuffle" onclick={shuffle} />
         {/if}
       </div>
+
+      <AlbumSearch payload={payload} onPayloadUpdate={(next) => (payload = next)} />
 
       <section class="album-stack">
         {#if payload.albums.length}

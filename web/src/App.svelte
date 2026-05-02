@@ -7,6 +7,7 @@
   import { navigate } from '$lib/router.svelte';
   import UtilityBar from './components/UtilityBar.svelte';
   import ToastNotice from './components/ToastNotice.svelte';
+  import SettingsModal from './components/SettingsModal.svelte';
   import Login from './routes/Login.svelte';
   import Home from './routes/Home.svelte';
   import ListPage from './routes/ListPage.svelte';
@@ -70,5 +71,8 @@
     <Placeholder title="Profile" note="Profile view port pending." />
   {:else if router.current.type === 'explore'}
     <Placeholder title="Explore" note="Explore view port pending." />
+  {/if}
+  {#if appState.settingsOpen}
+    <SettingsModal onClose={() => (appState.settingsOpen = false)} />
   {/if}
 </div>

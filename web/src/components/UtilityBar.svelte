@@ -37,11 +37,7 @@
     onclick={onExploreClick}
   />
   {#if appState.user}
-    <button
-      class="profile-button"
-      title="Account"
-      onclick={() => navigate(`/u/${encodeURIComponent(appState.user!.username)}`)}
-    >
+    <button class="profile-button" title="Account" onclick={() => (appState.settingsOpen = true)}>
       <Avatar member={appState.user} clickable={false} />
       {#if appState.invites.length}
         <span class="notify-dot">{appState.invites.length}</span>
