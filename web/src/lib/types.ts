@@ -198,3 +198,44 @@ export interface NotModifiedPayload {
   notModified: true;
   revision: string;
 }
+
+export interface ExploreListSummary {
+  slug: string;
+  name: string;
+  description: string;
+  sourceUrl?: string;
+  albumCount: number;
+}
+
+export interface ExploreAlbum {
+  title: string;
+  artist: string;
+  releaseYear: number | null;
+  coverUrl: string | null;
+  spotifyAlbumId?: string | null;
+}
+
+export interface ExploreList extends ExploreListSummary {
+  albums: ExploreAlbum[];
+}
+
+export interface PopularList {
+  id: number;
+  name: string;
+  description: string;
+  ownerUsername: string;
+  albumCount: number;
+  memberCount: number;
+  listenCount: number;
+  visibility: 'public' | 'unlisted' | 'private';
+  shareToken: string;
+}
+
+export interface ExploreIndexPayload {
+  lists: ExploreListSummary[];
+  popularLists: PopularList[];
+}
+
+export interface ExploreDetailPayload {
+  list: ExploreList;
+}

@@ -12,6 +12,7 @@
   import Home from './routes/Home.svelte';
   import ListPage from './routes/ListPage.svelte';
   import AlbumPage from './routes/AlbumPage.svelte';
+  import ExplorePage from './routes/ExplorePage.svelte';
   import Placeholder from './routes/Placeholder.svelte';
 
   let booted = $state<boolean>(false);
@@ -75,7 +76,7 @@
   {:else if router.current.type === 'profile'}
     <Placeholder title="Profile" note="Profile view port pending." />
   {:else if router.current.type === 'explore'}
-    <Placeholder title="Explore" note="Explore view port pending." />
+    <ExplorePage />
   {/if}
   {#if appState.settingsOpen}
     <SettingsModal onClose={() => (appState.settingsOpen = false)} />
