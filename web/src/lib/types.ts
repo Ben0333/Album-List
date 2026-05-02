@@ -274,3 +274,25 @@ export interface ProfilePayload {
   lists: ProfileListSummary[];
   ratedAlbums: ProfileAlbum[];
 }
+
+export interface HistoryCompletion {
+  completedAt: string;
+  albumKey: string;
+  title: string;
+  artist: string;
+  coverUrl: string | null;
+  listName: string;
+  aggregate: { average: number | null; count: number } | null;
+  myRatings: Array<{
+    trackKey: string;
+    trackTitle: string;
+    rating: number;
+    includeInAverage: boolean;
+    updatedAt: string;
+  }>;
+}
+
+export interface HistoryPayload {
+  user: User;
+  completions: HistoryCompletion[];
+}

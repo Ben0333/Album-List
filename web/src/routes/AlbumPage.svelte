@@ -17,13 +17,16 @@
 
   $effect(() => {
     const route = router.current;
-    if (route.type !== 'list' || route.albumId === null) return;
-    const id = route.id;
+    if ((route.type !== 'list' && route.type !== 'share') || route.albumId === null) return;
+    const url =
+      route.type === 'list'
+        ? `/api/lists/${route.id}`
+        : `/api/share/${encodeURIComponent(route.token)}`;
     let cancelled = false;
     loading = true;
     loadError = '';
     api
-      .get<ListPayload>(`/api/lists/${id}`)
+      .get<ListPayload>(url)
       .then((data) => {
         if (cancelled) return;
         payload = data;
@@ -43,13 +46,17 @@
   const album: ListAlbum | null = $derived.by(() => {
     if (!payload) return null;
     const route = router.current;
-    if (route.type !== 'list' || route.albumId === null) return null;
+    if ((route.type !== 'list' && route.type !== 'share') || route.albumId === null) return null;
     return payload.albums.find((a) => a.id === route.albumId) ?? null;
   });
 
   function back(): void {
-    if (!payload) return;
-    navigate(`/list/${payload.list.id}`);
+    const route = router.current;
+    if (route.type === 'share') {
+      navigate(`/share/${encodeURIComponent(route.token)}`);
+      return;
+    }
+    if (payload) navigate(`/list/${payload.list.id}`);
   }
 
   async function rateAlbum(rating: number): Promise<void> {
