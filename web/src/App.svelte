@@ -13,6 +13,8 @@
   import ListPage from './routes/ListPage.svelte';
   import AlbumPage from './routes/AlbumPage.svelte';
   import ExplorePage from './routes/ExplorePage.svelte';
+  import ProfilePage from './routes/ProfilePage.svelte';
+  import InvitePage from './routes/InvitePage.svelte';
   import Placeholder from './routes/Placeholder.svelte';
 
   let booted = $state<boolean>(false);
@@ -70,11 +72,11 @@
   {:else if router.current.type === 'share'}
     <Placeholder title="Shared list" note="Shared-list view port pending." />
   {:else if router.current.type === 'invite'}
-    <Placeholder title="Invitation" note="Invite acceptance flow port pending." />
+    <InvitePage />
   {:else if router.current.type === 'history'}
     <Placeholder title="History" note="History view port pending." />
   {:else if router.current.type === 'profile'}
-    <Placeholder title="Profile" note="Profile view port pending." />
+    <ProfilePage />
   {:else if router.current.type === 'explore'}
     <ExplorePage />
   {/if}

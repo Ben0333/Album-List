@@ -239,3 +239,38 @@ export interface ExploreIndexPayload {
 export interface ExploreDetailPayload {
   list: ExploreList;
 }
+
+export interface ProfileListSummary {
+  id: number;
+  name: string;
+  description: string;
+  visibility: 'private' | 'unlisted' | 'public';
+  albumCount: number;
+  memberCount: number;
+}
+
+export interface ProfileAlbum {
+  albumKey: string;
+  title: string;
+  artist: string;
+  coverUrl: string | null;
+  completedAt: string | null;
+  ratedAt: string | null;
+  fullyListened: boolean;
+  average: number | null;
+  ratingCount: number;
+  ratings: Array<{
+    trackKey: string;
+    trackTitle: string;
+    rating: number;
+    includeInAverage: boolean;
+    updatedAt: string;
+  }>;
+  inCommon: boolean;
+}
+
+export interface ProfilePayload {
+  user: User;
+  lists: ProfileListSummary[];
+  ratedAlbums: ProfileAlbum[];
+}
