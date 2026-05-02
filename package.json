@@ -7,15 +7,12 @@
   "workspaces": [
     "server",
     "web",
-    "shared",
-    "admin"
+    "shared"
   ],
   "scripts": {
     "dev": "concurrently -n server,web -c blue,green \"npm run dev -w @albums/server\" \"npm run dev -w @albums/web\"",
-    "dev:legacy": "LEGACY_FRONTEND=1 npm run dev -w @albums/server",
     "dev:server": "npm run dev -w @albums/server",
     "dev:web": "npm run dev -w @albums/web",
-    "dev:admin": "npm run dev -w @albums/admin",
     "build": "npm run build -w @albums/web",
     "start": "npm run start -w @albums/server",
     "check": "npm run check -w @albums/server && npm run check -w @albums/web",

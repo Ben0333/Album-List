@@ -9,7 +9,6 @@ COPY package.json package-lock.json* ./
 COPY server/package.json server/
 COPY web/package.json web/
 COPY shared/package.json shared/
-COPY admin/package.json admin/
 RUN npm ci --workspaces --include-workspace-root --ignore-scripts
 
 COPY shared/ shared/

@@ -13,10 +13,11 @@ import { exploreLists } from './explore-data.js';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const repoRoot = path.resolve(__dirname, '..', '..');
-const builtPublicDir = path.join(repoRoot, 'web', 'dist');
-const legacyPublicDir = path.join(repoRoot, 'server', 'legacy-public');
-const useLegacyFrontend = process.env.LEGACY_FRONTEND === '1' || !fs.existsSync(path.join(builtPublicDir, 'index.html'));
-const publicDir = useLegacyFrontend ? legacyPublicDir : builtPublicDir;
+const publicDir = path.join(repoRoot, 'web', 'dist');
+if (!fs.existsSync(path.join(publicDir, 'index.html'))) {
+  console.error(`web/dist/index.html missing at ${publicDir}. Run \`npm run build\` first.`);
+  process.exit(1);
+}
 const app = express();
 
 const avatarColors = ['#4f8cff', '#15b8a6', '#f59e0b', '#ef4444', '#8b5cf6', '#22c55e', '#f97316', '#06b6d4'];
@@ -91,7 +92,11 @@ app.use(loadSession);
 app.use(
   express.static(publicDir, {
     setHeaders(res, filePath) {
-      if (/\.(html|js|css)$/i.test(filePath)) {
+      if (/[\\/]assets[\\/].+-[A-Za-z0-9_-]+\.(js|css|woff2?|ttf|otf|eot|svg|png|jpg|webp|avif)$/i.test(filePath)) {
+        res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+        return;
+      }
+      if (/\.(html|js|css|json)$/i.test(filePath)) {
         res.setHeader('Cache-Control', 'no-cache');
       }
     }

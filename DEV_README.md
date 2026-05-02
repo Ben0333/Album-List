@@ -2,7 +2,10 @@
 
 ## Product Shape
 
-This app is for album lists first. Song-only lists may exist later, but do not build that now unless requested. Keep album URLs/routes generic enough that a future `songs.` subdomain or parallel song mode could reuse the same account/session/list patterns.
+This app is for album lists first. Song-only lists may exist later, but do not
+build that now unless requested. Keep album URLs/routes generic enough that a
+future `songs.` subdomain or parallel song mode could reuse the same
+account/session/list patterns.
 
 Core rules:
 
@@ -17,77 +20,96 @@ Core rules:
 - Collaborative lists have closeable right-side chat with unread counts and timestamps.
 - Collaborative pages use short polling for live album, rating, listened, removal-vote, and chat updates. Keep this simple unless a real websocket/SSE need appears.
 - Collaborative album removal requires votes from at least one quarter of members.
-- Collaborative members can leave shared lists; owners can remove non-owner members. Non-owners should only see a remove/leave control for themselves.
+- Collaborative members can leave shared lists; owners can remove non-owner members.
 - Ratings and shared listening state are logged-in features.
 - Track ratings are 0-10 and roll up to album averages when the user opts in; individual track ratings can also be excluded from averages.
-- Ratings should be reusable across lists so users do not have to re-review the same album/tracks.
-- Listened/completed state should be treated as reusable per user/album, not only per list row.
-- Recommendations are currently a local algorithm, not LLM-based: use high ratings to find similar users and suggest unrated/unlisted albums, with explore-list fallback when rating data is thin.
-- Rating every track on a listed album must auto-complete that album for the current user.
-- Rated/completed album activity must persist independently of list rows.
-- Include dark mode, light mode, and a late-90s easter egg theme.
+- Ratings are reusable across lists by normalized `album_key` and `track_key`.
+- Listened/completed state is reusable per user/album, not only per list row.
+- Recommendations use a local rating-based algorithm. Endpoint exists; not currently surfaced in the UI.
+- Rating every track on a listed album auto-completes that album for the current user.
+- Rated/completed album activity persists independently of list rows.
+- Themes: light, dark, and a late-90s easter egg theme.
 - Accent color derives from `users.music_platform` unless `users.accent_color` is set.
 
 ## Architecture
 
-- `apps/main/src/server.js`: public Express app, auth/session helpers, REST routes, list/rating/history logic.
-- `apps/main/src/explore-data.js`: static curated explore-list data. The `1001-all-editions` list mirrors `https://1001albumsgenerator.com/albums` as of April 28, 2026 and currently contains 1,088 albums across editions plus Spotify album IDs for cover hydration.
-- `apps/main/public/index.html`: public app root.
-- `apps/main/public/app.js`: vanilla JS client/router/state/rendering.
-- `apps/main/public/styles.css`: responsive UI and themes.
-- `apps/admin/src/server.js`: local-only admin Express app for stats, account disabling, and account anonymization.
-- `apps/admin/public/`: local admin dashboard UI.
-- `packages/shared/src/db.js`: SQLite connection, schema, normalization helpers, transaction helper.
-- `packages/shared/src/config.js`: shared environment config.
-- `data/albums.sqlite`: local database, ignored by git.
-- `../Start Albums App.bat` / `../Stop Albums App.bat`: Windows one-click main server controls that use `.server.pid`.
-- `../Start Albums Admin.bat` / `../Stop Albums Admin.bat`: Windows one-click local admin controls that use `.admin.pid`.
-- `../Start Cloudflare Tunnel.bat` / `../Stop Cloudflare Tunnel.bat`: Windows Cloudflared service controls that use `scripts/cloudflare-tunnel-control.ps1`.
+```
+server/                      Express JSON API
+  src/server.js              public Express app: auth/session, REST routes, list/rating/history logic
+  src/explore-data.js        static curated explore-list data
+web/                         Svelte 5 + Vite + TypeScript SPA
+  src/App.svelte             route dispatcher
+  src/main.ts                mount entry, imports global styles.css
+  src/styles.css             global theme + layout (ported from the original vanilla UI)
+  src/lib/                   shared modules: api client, router, state, theme, types, etc.
+  src/components/            reusable UI (Avatar, AlbumRow, ChatPanel, SettingsModal, ...)
+  src/routes/                page components (Login, ListPage, AlbumPage, ExplorePage, ...)
+shared/                      @albums/shared workspace
+  src/db.js                  SQLite connection, schema, normalization helpers, transactions
+  src/config.js              environment config + production safety checks
+data/albums.sqlite           local DB, gitignored
+```
 
-There is no frontend build pipeline. Keep it that way unless there is a clear reason to add one.
+The server serves `web/dist/` as static assets in production, with a `*` SPA
+fallback so client-side routes (`/list/:id`, `/u/:username`, etc.) refresh
+correctly. Vite handles hashed asset filenames; the Express static middleware
+sets `immutable` cache headers on `assets/*` and `no-cache` on `index.html`.
+
+In dev, run `npm run dev` to start both Vite (port 5173) and the API server
+(port 3000). Vite proxies `/api` and `/u` to the API server.
 
 ## Security and Deployment Notes
 
-- Production startup validation lives in `packages/shared/src/config.js`. With `NODE_ENV=production`, the public app requires a public `https://` `APP_ORIGIN`, `COOKIE_SECURE=true`, and an explicit persistent `DATABASE_PATH`.
-- The admin app binds to `ADMIN_HOST` and defaults to `127.0.0.1`. Keep it local-only; do not put it behind a public reverse proxy.
-- Session cookies are HTTP-only, same-site `lax`, and secure when `COOKIE_SECURE=true`.
-- Mutating `/api` requests are same-origin protected with `Origin` and Fetch Metadata checks. Keep new write endpoints under `/api` so this middleware applies.
-- `helmet` sets security headers and CSP. Current CSP allows same-origin scripts/connections/styles, inline styles for the existing vanilla UI, and images from `self`, `data:`, and `https:`.
-- Rate limits are process-local maps. This is acceptable for one beta Node process; use a shared limiter before running multiple instances.
-- User search intentionally supports partial username search, but email matching is exact-only to reduce email enumeration.
-- Do not expose `password_hash`, session token hashes, invite tokens, history tokens, or non-manager share tokens in API responses.
-- Avatar uploads are constrained data URLs and album cover URLs are normalized to HTTPS before storage/output.
+- Production startup validation lives in `shared/src/config.js`. With
+  `NODE_ENV=production`, the app requires a public `https://` `APP_ORIGIN`,
+  `COOKIE_SECURE=true`, and an explicit persistent `DATABASE_PATH`.
+- Session cookies are HTTP-only, same-site `lax`, and secure when
+  `COOKIE_SECURE=true`.
+- Mutating `/api` requests are same-origin protected with `Origin` and Fetch
+  Metadata checks. Keep new write endpoints under `/api` so this middleware
+  applies.
+- `helmet` sets security headers and CSP. Current CSP allows same-origin
+  scripts/connections, inline styles (Vite emits some), and images from
+  `self`, `data:`, and `https:`.
+- Rate limits are process-local maps. Acceptable for one Node process; use a
+  shared limiter before running multiple instances.
+- User search supports partial username search; email matching is exact-only
+  to reduce email enumeration.
+- Do not expose `password_hash`, session token hashes, invite tokens, history
+  tokens, or non-manager share tokens in API responses.
+- Avatar uploads are constrained data URLs; album cover URLs are normalized
+  to HTTPS before storage/output.
 
 ## Database Notes
 
-Node's built-in `node:sqlite` is used to avoid native npm SQLite packages. This matters on Windows because native packages may require Visual Studio C++ build tools.
+Node's built-in `node:sqlite` is used to avoid native npm SQLite packages.
 
 Important tables:
 
 - `users`: account, theme, history sharing, avatar color, disabled/anonymized markers.
 - `users.avatar_data_url`: small uploaded profile image stored as a data URL.
 - `users.music_platform`: preferred external music service; `na` maps to YouTube Music links.
-- `users.accent_color`: optional custom hex accent override; empty means derive from music platform.
+- `users.accent_color`: optional custom hex accent override; empty derives from music platform.
 - `sessions`: persistent HTTP-only cookie sessions.
 - `lists`: personal/collab lists, visibility, share/invite tokens, rating display flag.
 - `list_members`: owner/editor/viewer roles.
 - `list_invites`: pending/accepted/declined account-targeted invites.
 - `list_albums`: album entries on a specific list.
 - `album_tracks`: tracks loaded from the selected album metadata result.
-- `album_completions`: who listened to which album entry. `user_album_activity.completed_at` is also used to carry listened state across lists for the same user/album.
+- `album_completions`: who listened to which album entry.
+- `user_album_activity`: profile/history activity that survives list entry deletion.
 - `list_album_removal_votes`: collaborative removal voting.
 - `list_messages`: collaborative list chat.
 - `track_ratings`: reusable user ratings by normalized `album_key` and `track_key`.
 - `album_average_opt_in`: user-level opt-in/out for aggregate album averages.
-- `user_album_activity`: profile/history activity that survives list entry deletion.
 - `explore_album_covers`: persistent on-demand cache for explore cover URLs.
-- `admin_action_log`: local admin disable/enable/anonymize action history.
 
 Do not store plaintext passwords. Do not move sessions to localStorage.
 
 ## API Conventions
 
-All API endpoints are same-origin JSON under `/api`.
+All API endpoints are same-origin JSON under `/api`. Frontend routes go to
+`web/dist/index.html` via the SPA fallback.
 
 Useful flows:
 
@@ -96,54 +118,34 @@ Useful flows:
 - `POST /api/auth/login`
 - `POST /api/auth/logout`
 - `GET /api/me`
-- `GET /api/me/album-lists` to check which editable lists already contain an album key
-- `PATCH /api/me` for theme/history/profile photo updates
+- `PATCH /api/me` (theme, music platform, accent color, profile photo)
+- `GET /api/me/album-lists?title=&artist=` — list picker source
 - `GET /api/lists`
-- `POST /api/lists` to create a collaborative list
-- `GET /api/explore`
-- `GET /api/explore/:slug`
-- `GET /api/explore/:slug/covers`
-- `POST /api/explore/:slug/covers/:index/refresh`
-- `GET /api/recommendations`
-- `GET /api/lists/:id`
+- `POST /api/lists` (collab only)
+- `GET /api/lists/:id` and `GET /api/lists/:id?revision=...` (polling)
 - `PATCH /api/lists/:id`
 - `GET /api/share/:token`
 - `POST /api/invites/:token/join`
 - `POST /api/lists/:id/invites`
 - `GET /api/invitations`
-- `POST /api/invitations/:id/accept`
-- `POST /api/invitations/:id/decline`
-- `POST /api/lists/:id/albums`
-- `POST /api/lists/:id/albums/copy`
+- `POST /api/invitations/:id/accept` / `decline`
+- `POST /api/lists/:id/albums` / `albums/copy`
 - `POST /api/lists/:id/albums/:albumId/cover/refresh`
 - `DELETE /api/lists/:id/albums/by-key`
-- `POST /api/lists/:id/messages`
-- `PATCH /api/lists/:id/members/:userId`
-- `DELETE /api/lists/:id/members/:userId` for owner kick or self-leave
-- `PATCH /api/lists/:id/albums/:albumId`
-- `PUT /api/lists/:id/albums/:albumId/rating` for album-level fallback ratings when track metadata is unavailable
+- `DELETE /api/lists/:id/albums/:albumId` (also handles collab vote-removal)
 - `POST /api/lists/:id/albums/:albumId/complete`
+- `PUT /api/lists/:id/albums/:albumId/rating` (album-level fallback)
+- `PATCH /api/lists/:id/albums/:albumId/rating-preferences`
 - `PUT /api/lists/:id/albums/:albumId/tracks/:trackId/rating`
 - `PATCH /api/lists/:id/albums/:albumId/tracks/:trackId/rating-preferences`
-- `PUT /api/me/albums/:albumKey/ratings/:trackKey` for editing existing ratings from the signed-in user's profile album page
+- `POST /api/lists/:id/messages`
+- `DELETE /api/lists/:id/members/:userId` (kick or self-leave)
+- `PUT /api/me/albums/:albumKey/ratings/:trackKey` — own-profile rating edits
 - `GET /api/users/:username`
+- `GET /api/users?q=` — username/email search
 - `GET /api/history/:token`
-
-The admin app has its own local-only `/api` surface under port `ADMIN_PORT`, including:
-
-- `GET /api/site/status`
-- `POST /api/site/start`
-- `POST /api/site/stop`
-- `POST /api/site/restart`
-- `GET /api/tunnel/status`
-- `POST /api/tunnel/start`
-- `POST /api/tunnel/stop`
-- `POST /api/lockdown`
-- `GET /api/stats`
-- `GET /api/accounts`
-- `POST /api/accounts/:id/disable`
-- `POST /api/accounts/:id/enable`
-- `POST /api/accounts/:id/anonymize`
+- `GET /api/explore` and `/api/explore/:slug` and `/api/explore/:slug/covers`
+- `GET /api/recommendations`
 
 ## UI Rules
 
@@ -152,75 +154,41 @@ Keep the app screen first. Do not turn this into a marketing landing page.
 Maintain:
 
 - responsive mobile and desktop layouts
-- clean app-style controls
 - minimalist first screen with no heavy header/sidebar
 - `/login` as the dedicated auth page
 - album add flow as one search input plus dropdown suggestions
-- clicking an album search result should add it immediately; do not require a second Add click
+- clicking an album search result adds it immediately; no second confirm click
 - album search must include song-result mapping back to albums
-- share panel should follow the Google Docs-style model: link is view-only, explicit members get roles
-- settings should open as a modal, not an inline panel
-- saving settings should close the modal
-- list owners should have a direct rename affordance near the list title, in addition to the settings form
-- profile photo upload should go through the square crop modal before saving, with both sliders and pointer-drag panning
-- modern action buttons should be minimalist icon buttons using `renderActionButton`; the retro theme should expose text labels and hide icons
-- keep list-altering actions live by applying returned payloads; avoid forcing route reloads for add/rate/listened/chat
-- after sending chat with Enter, keep focus in the chat input so repeated messages feel continuous
-- visible user avatars and names should link to `/u/:username`
-- album rows in list, explore, profile, and history contexts should open a detail page instead of being dead static rows
-- profile/history album detail routes should show the rated user's track-level ratings when available
-- own-profile album detail routes should let the signed-in user edit their existing ratings in place
-- profile rated albums should sort fully listened albums above unfinished albums; do not let a half-rated album jump above completed albums just because it has a high average
+- share panel follows the Google Docs-style model: link is view-only, explicit members get roles
+- settings opens as a modal, not an inline panel
+- list owners get a list-settings panel inside the global settings modal when viewing their own list
+- profile photo upload goes through the square crop modal before saving
+- modern action buttons are minimalist icon buttons; the retro theme exposes text labels and hides icons
+- list-altering actions apply returned payloads instead of forcing route reloads
+- after sending chat with Enter, keep focus in the chat input
+- visible user avatars and names link to `/u/:username`
+- album rows in list/explore/profile/history contexts open a detail page instead of being dead static rows
+- own-profile album detail routes let the signed-in user edit their existing ratings in place
+- profile rated albums sort fully listened above unfinished
 - keep `/explore` as usable list content, not a marketing page
-- keep `1001-all-editions` synced from the public 1001 Albums Generator album page when intentionally refreshing that snapshot
-- keep the generated external Explore lists source-tagged; current added sources include Rolling Stone 500 via `thegreatestmusic.org`, Needle Drop 10s, and The Quietus Baker's Dozen sampler.
-- explore album covers are hydrated through `/api/explore/:slug/covers`; the frontend uses intersection-triggered batches and the backend persists covers in `explore_album_covers`. Do not reintroduce full-list re-render loops or eager loading of all 1,088 covers on page load.
-- broken album covers should render as initials immediately and only refresh through targeted cover-refresh endpoints; do not make list views block on cover validation.
-- adding albums from explore/shared views should open the list picker and mark existing destination lists with a checkmark; clicking a checked list removes the album, or records a removal vote for collaborative lists
-- exception: guests adding from Explore should not see the list picker; the plus/check button should add directly to the local guest list with duplicate protection
-- keep recommendations backend-only until a real recommendations page is intentionally designed; do not re-add a Recommended block to `/explore`
-- platform color should change with music platform unless the user has set a custom accent
-- no user-facing cover URL, notes, or manual track fields
-- if an album has no tracks, keep the album-level 0-10 rating fallback instead of showing a dead "track list unavailable" state
-- no nested cards
-- album rows as repeated items only
-- compact controls on mobile
-- readable contrast in all three themes
+- adding albums from explore/shared views opens the list picker; existing destinations show a checkmark; clicking a checked list removes the album (or votes for collab)
+- guests adding from Explore add directly to the local guest list with duplicate protection
+- recommendations backend exists but is not surfaced in the UI; do not re-add a Recommended block to `/explore`
+- platform color changes with music platform unless the user set a custom accent
+- if an album has no tracks, keep the album-level 0-10 rating fallback
 - no decorative gradients/orbs
 
-## Next Likely Work
+## Verification
 
-- Add additional metadata providers for external links through Spotify, YouTube, or other APIs.
-- Current metadata lookup uses cached Apple iTunes Search/Lookup API calls plus MusicBrainz release search through `/api/albums/search` and `/api/albums/lookup/:providerId`.
-- iTunes lookup may overlay matching Japanese storefront track titles for native-script display while preserving the original lookup title as the rating key source.
-- MusicBrainz search handles mixed `album artist` and `artist album` queries by generating release/artist field clauses, includes Albums and EPs, and runs through a one-at-a-time request queue to stay within the public API guidance.
-- MusicBrainz fallback IDs use `mb:<releaseId>`. Keep lookup support for these provider IDs.
-- Add ownership transfer for collaborative lists.
-- Add drag-and-drop album ordering.
-- Add import/export.
-- Add richer profile pages.
-- Add a small refresh script if the 1001 snapshot needs routine updates.
-- Add password reset once email sending exists.
-- Keep the admin dashboard local-only; add stronger authentication before any future remote exposure.
-
-## Verification Used
-
-The current implementation was smoke-tested with:
-
-- health check
-- account registration
-- guest album import
-- personal list fetch
-- album creation
-- track rating
-- completion toggle
-- unlisted share setting
-- public share fetch
-
-Run syntax checks with:
-
-```powershell
-cd MAIN_WEBSITE
-npm run check
+```sh
+npm install
+npm run check        # node --check on server, svelte-check on web
 npm run audit
+npm run build        # builds web/dist
+npm start            # runs server against the built SPA at :3000
 ```
+
+Smoke-tested flows: health check, account registration, guest album import,
+personal list fetch, album creation/removal, track rating, completion toggle,
+unlisted share setting, public share fetch, chat send + 5 s polling, list
+picker add/remove, invite accept, profile-album rating edit.

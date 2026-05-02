@@ -8,12 +8,10 @@
 **/data/*.sqlite
 **/data/*.sqlite-*
 **/dist
-admin
 DEV_README.md
 README.md
 **/.DS_Store
 **/.server.pid
-**/.admin.pid
 **/*.bat
 docker-compose.yml
 Dockerfile
