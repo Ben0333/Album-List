@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { api, ApiError } from '$lib/api';
+  import { api, getErrorMessage } from '$lib/api';
   import { appState, persistChatOpen, persistChatReadIds } from '$lib/state.svelte';
   import type { ListPayload } from '$lib/types';
   import IconButton from './IconButton.svelte';
@@ -24,7 +24,9 @@
   }
 
   $effect(() => {
-    appState.chatReadIds[listKey] = latestMessageId();
+    const id = latestMessageId();
+    if (appState.chatReadIds[listKey] === id) return;
+    appState.chatReadIds[listKey] = id;
     persistChatReadIds();
   });
 
@@ -38,7 +40,7 @@
       onPayloadUpdate(data);
       draft = '';
     } catch (err) {
-      chatError = err instanceof ApiError ? err.message : (err as Error).message;
+      chatError = getErrorMessage(err);
     } finally {
       sending = false;
     }

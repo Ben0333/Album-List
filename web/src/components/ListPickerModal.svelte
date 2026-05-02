@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { api, ApiError } from '$lib/api';
+  import { api, getErrorMessage } from '$lib/api';
   import { appState } from '$lib/state.svelte';
   import Cover from './Cover.svelte';
   import IconButton from './IconButton.svelte';
@@ -41,7 +41,7 @@
       })
       .catch((err: unknown) => {
         if (cancelled) return;
-        modalError = err instanceof ApiError ? err.message : (err as Error).message;
+        modalError = getErrorMessage(err);
       })
       .finally(() => {
         if (!cancelled) loading = false;
@@ -78,7 +78,7 @@
         appState.notice = result.copied ? `Added to "${list.name}".` : `Already in "${list.name}".`;
       }
     } catch (err) {
-      modalError = err instanceof ApiError ? err.message : (err as Error).message;
+      modalError = getErrorMessage(err);
     } finally {
       busyListId = null;
     }

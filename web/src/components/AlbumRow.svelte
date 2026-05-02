@@ -1,7 +1,7 @@
 <script lang="ts">
   import type { ListAlbum, ListPayload } from '$lib/types';
   import { navigate } from '$lib/router.svelte';
-  import { api, ApiError } from '$lib/api';
+  import { api, getErrorMessage } from '$lib/api';
   import { appState } from '$lib/state.svelte';
   import Cover from './Cover.svelte';
   import Completion from './Completion.svelte';
@@ -75,7 +75,7 @@
         onPayloadUpdate({ ...payload, albums });
       }
     } catch (err) {
-      appState.error = err instanceof ApiError ? err.message : (err as Error).message;
+      appState.error = getErrorMessage(err);
     } finally {
       busy = false;
     }
@@ -92,7 +92,7 @@
       onPayloadUpdate({ ...payload, albums });
       appState.notice = 'Cover refreshed.';
     } catch (err) {
-      appState.error = err instanceof ApiError ? err.message : (err as Error).message;
+      appState.error = getErrorMessage(err);
     } finally {
       busy = false;
     }

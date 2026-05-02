@@ -1,6 +1,6 @@
 <script lang="ts">
   import { appState, persistTheme } from '$lib/state.svelte';
-  import { api, ApiError } from '$lib/api';
+  import { api, getErrorMessage } from '$lib/api';
   import { applyAccent, applyTheme } from '$lib/theme';
   import { navigate } from '$lib/router.svelte';
   import { refreshMe } from '$lib/me';
@@ -61,7 +61,7 @@
       applyAccent(data.user.accentColor);
       appState.notice = 'Music platform saved.';
     } catch (err) {
-      modalError = err instanceof ApiError ? err.message : (err as Error).message;
+      modalError = getErrorMessage(err);
     }
   }
 
@@ -73,7 +73,7 @@
       appState.user = data.user;
       applyAccent(data.user.accentColor);
     } catch (err) {
-      modalError = err instanceof ApiError ? err.message : (err as Error).message;
+      modalError = getErrorMessage(err);
     }
   }
 
@@ -86,7 +86,7 @@
       applyAccent(data.user.accentColor);
       appState.notice = 'Using platform color.';
     } catch (err) {
-      modalError = err instanceof ApiError ? err.message : (err as Error).message;
+      modalError = getErrorMessage(err);
     }
   }
 
@@ -120,7 +120,7 @@
       onClose();
       navigate('/login');
     } catch (err) {
-      modalError = err instanceof ApiError ? err.message : (err as Error).message;
+      modalError = getErrorMessage(err);
     } finally {
       saving = false;
     }

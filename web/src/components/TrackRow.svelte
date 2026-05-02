@@ -1,6 +1,6 @@
 <script lang="ts">
   import type { AlbumTrack, ListAlbum, ListPayload } from '$lib/types';
-  import { api, ApiError } from '$lib/api';
+  import { api, getErrorMessage } from '$lib/api';
   import RatingRow from './RatingRow.svelte';
   import IconButton from './IconButton.svelte';
 
@@ -34,7 +34,7 @@
       const albums = payload.albums.map((a) => (a.id === data.album.id ? data.album : a));
       onPayloadUpdate({ ...payload, albums });
     } catch (err) {
-      rowError = err instanceof ApiError ? err.message : (err as Error).message;
+      rowError = getErrorMessage(err);
     } finally {
       busy = false;
     }
@@ -52,7 +52,7 @@
       const albums = payload.albums.map((a) => (a.id === data.album.id ? data.album : a));
       onPayloadUpdate({ ...payload, albums });
     } catch (err) {
-      rowError = err instanceof ApiError ? err.message : (err as Error).message;
+      rowError = getErrorMessage(err);
     } finally {
       busy = false;
     }

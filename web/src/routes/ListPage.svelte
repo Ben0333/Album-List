@@ -1,7 +1,7 @@
 <script lang="ts">
   import { appState, persistChatOpen } from '$lib/state.svelte';
   import { router, navigate } from '$lib/router.svelte';
-  import { api, ApiError } from '$lib/api';
+  import { api, getErrorMessage } from '$lib/api';
   import type { ListAlbum, ListPayload, NotModifiedPayload } from '$lib/types';
   import IconButton from '../components/IconButton.svelte';
   import AlbumRow from '../components/AlbumRow.svelte';
@@ -36,11 +36,10 @@
       .then((data) => {
         if (cancelled) return;
         payload = data;
-        appState.currentListPayload = data;
       })
       .catch((err: unknown) => {
         if (cancelled) return;
-        loadError = err instanceof ApiError ? err.message : (err as Error).message;
+        loadError = getErrorMessage(err);
       })
       .finally(() => {
         if (!cancelled) loading = false;
@@ -102,7 +101,7 @@
       appState.notice = `Created "${data.list.list.name}".`;
       navigate(`/list/${data.list.list.id}`);
     } catch (err) {
-      appState.error = err instanceof ApiError ? err.message : (err as Error).message;
+      appState.error = getErrorMessage(err);
     }
   }
 

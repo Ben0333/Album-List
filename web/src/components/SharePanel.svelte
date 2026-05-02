@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { api, ApiError } from '$lib/api';
+  import { api, getErrorMessage } from '$lib/api';
   import { appState } from '$lib/state.svelte';
   import { navigate } from '$lib/router.svelte';
   import { copyText } from '$lib/clipboard';
@@ -30,7 +30,7 @@
         const data = await api.post<ListPayload>(`/api/lists/${payload.list.id}/share/publish`);
         onPayloadUpdate(data);
       } catch (err) {
-        panelError = err instanceof ApiError ? err.message : (err as Error).message;
+        panelError = getErrorMessage(err);
         return;
       }
     }
@@ -47,7 +47,7 @@
       await api.post(`/api/lists/${payload.list.id}/invites`, { identifier: user.username, role });
       appState.notice = `Invite sent to ${user.username}.`;
     } catch (err) {
-      panelError = err instanceof ApiError ? err.message : (err as Error).message;
+      panelError = getErrorMessage(err);
     } finally {
       busy = false;
     }
@@ -71,7 +71,7 @@
         navigate('/');
       }
     } catch (err) {
-      panelError = err instanceof ApiError ? err.message : (err as Error).message;
+      panelError = getErrorMessage(err);
     } finally {
       busy = false;
     }

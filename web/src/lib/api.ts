@@ -48,3 +48,9 @@ export const api = {
   patch: <T>(path: string, body?: Json) => request<T>('PATCH', path, body),
   delete: <T>(path: string, body?: Json) => request<T>('DELETE', path, body)
 };
+
+export function getErrorMessage(err: unknown): string {
+  if (err instanceof ApiError) return err.message;
+  if (err instanceof Error) return err.message;
+  return String(err);
+}

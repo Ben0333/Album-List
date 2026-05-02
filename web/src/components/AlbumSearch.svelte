@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { api, ApiError } from '$lib/api';
+  import { api, ApiError, getErrorMessage } from '$lib/api';
   import Cover from './Cover.svelte';
   import Icon from './Icon.svelte';
 
@@ -85,7 +85,7 @@
       suggestions = [];
       open = false;
     } catch (err) {
-      lastError = err instanceof ApiError ? err.message : (err as Error).message;
+      lastError = getErrorMessage(err);
     } finally {
       adding = false;
     }

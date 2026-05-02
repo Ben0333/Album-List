@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { api, ApiError } from '$lib/api';
+  import { api, getErrorMessage } from '$lib/api';
   import { appState } from '$lib/state.svelte';
   import { composeAvatar } from '$lib/avatar';
   import type { User } from '$lib/types';
@@ -44,7 +44,7 @@
       appState.notice = 'Profile photo saved.';
       onClose();
     } catch (err) {
-      cropError = err instanceof ApiError ? err.message : (err as Error).message;
+      cropError = getErrorMessage(err);
     } finally {
       saving = false;
     }

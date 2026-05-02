@@ -1,6 +1,6 @@
 <script lang="ts">
   import { router } from '$lib/router.svelte';
-  import { api, ApiError } from '$lib/api';
+  import { api, getErrorMessage } from '$lib/api';
   import type { ListPayload } from '$lib/types';
   import AlbumRow from '../components/AlbumRow.svelte';
   import Placeholder from './Placeholder.svelte';
@@ -23,7 +23,7 @@
       })
       .catch((err: unknown) => {
         if (cancelled) return;
-        loadError = err instanceof ApiError ? err.message : (err as Error).message;
+        loadError = getErrorMessage(err);
       })
       .finally(() => {
         if (!cancelled) loading = false;
@@ -33,7 +33,7 @@
     };
   });
 
-  const pathPrefix = $derived(() => {
+  const pathPrefix = $derived.by(() => {
     const route = router.current;
     if (route.type !== 'share') return '';
     return `/share/${encodeURIComponent(route.token)}`;
@@ -61,7 +61,7 @@
             <AlbumRow
               {album}
               {payload}
-              pathPrefix={pathPrefix()}
+              pathPrefix={pathPrefix}
               onPayloadUpdate={(next) => (payload = next)}
             />
           {/each}

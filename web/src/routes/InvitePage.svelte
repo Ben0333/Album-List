@@ -1,6 +1,6 @@
 <script lang="ts">
   import { router, navigate } from '$lib/router.svelte';
-  import { api, ApiError } from '$lib/api';
+  import { api, getErrorMessage } from '$lib/api';
   import { appState } from '$lib/state.svelte';
   import { refreshMe } from '$lib/me';
   import type { ListPayload } from '$lib/types';
@@ -20,7 +20,7 @@
       appState.notice = `Joined "${data.list.name}".`;
       navigate(`/list/${data.list.id}`);
     } catch (err) {
-      pageError = err instanceof ApiError ? err.message : (err as Error).message;
+      pageError = getErrorMessage(err);
     } finally {
       busy = false;
     }

@@ -12,3 +12,6 @@ npm-debug.log*
 web/dist
 .vite
 *.tsbuildinfo
+flake.nix
+flake.lock
+.direnv/

@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { api, ApiError } from '$lib/api';
+  import { api, getErrorMessage } from '$lib/api';
   import { appState } from '$lib/state.svelte';
   import { refreshMe } from '$lib/me';
   import type { InviteSummary, ListSummary } from '$lib/types';
@@ -21,7 +21,7 @@
       await refreshMe();
       appState.notice = `Joined "${invite.list.name}".`;
     } catch (err) {
-      panelError = err instanceof ApiError ? err.message : (err as Error).message;
+      panelError = getErrorMessage(err);
     } finally {
       busy = false;
     }
@@ -37,7 +37,7 @@
       );
       appState.invites = data.invites;
     } catch (err) {
-      panelError = err instanceof ApiError ? err.message : (err as Error).message;
+      panelError = getErrorMessage(err);
     } finally {
       busy = false;
     }

@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { api, ApiError } from '$lib/api';
+  import { api, getErrorMessage } from '$lib/api';
   import { appState } from '$lib/state.svelte';
   import { navigate } from '$lib/router.svelte';
   import { refreshMe } from '$lib/me';
@@ -16,9 +16,15 @@
   let busy = $state<boolean>(false);
   let panelError = $state<string>('');
 
-  function completedCount(member: Member): number {
-    return payload.albums.filter((album) => album.completions.some((c) => c.userId === member.userId)).length;
-  }
+  const completedByMember = $derived.by(() => {
+    const counts = new Map<number, number>();
+    for (const album of payload.albums) {
+      for (const c of album.completions) {
+        counts.set(c.userId, (counts.get(c.userId) ?? 0) + 1);
+      }
+    }
+    return counts;
+  });
 
   function canRemoveMember(member: Member): boolean {
     if (!appState.user || payload.list.kind !== 'collab') return false;
@@ -45,7 +51,7 @@
         navigate('/');
       }
     } catch (err) {
-      panelError = err instanceof ApiError ? err.message : (err as Error).message;
+      panelError = getErrorMessage(err);
     } finally {
       busy = false;
     }
@@ -58,7 +64,7 @@
     <div class="person-line">
       <Avatar member={member} />
       <strong>{member.username}</strong>
-      <span>{completedCount(member)}/{payload.albums.length} listened</span>
+      <span>{completedByMember.get(member.userId) ?? 0}/{payload.albums.length} listened</span>
       <span>{member.role}</span>
       {#if canRemoveMember(member)}
         <IconButton

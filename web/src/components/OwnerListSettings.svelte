@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { api, ApiError } from '$lib/api';
+  import { api, getErrorMessage } from '$lib/api';
   import { appState } from '$lib/state.svelte';
   import type { ListPayload } from '$lib/types';
   import IconButton from './IconButton.svelte';
@@ -42,7 +42,7 @@
       appState.currentListPayload = data;
       appState.notice = 'List settings saved.';
     } catch (err) {
-      saveError = err instanceof ApiError ? err.message : (err as Error).message;
+      saveError = getErrorMessage(err);
     } finally {
       busy = false;
     }

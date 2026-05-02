@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { ApiError } from '$lib/api';
+  import { ApiError, getErrorMessage } from '$lib/api';
   import Avatar from './Avatar.svelte';
   import Icon from './Icon.svelte';
 
@@ -71,7 +71,7 @@
       results = [];
       open = false;
     } catch (err) {
-      pickError = err instanceof ApiError ? err.message : (err as Error).message;
+      pickError = getErrorMessage(err);
     }
   }
 

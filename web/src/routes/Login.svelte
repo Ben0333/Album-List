@@ -1,7 +1,7 @@
 <script lang="ts">
   import { appState, buildGuestImport, clearGuest } from '$lib/state.svelte';
   import { navigate } from '$lib/router.svelte';
-  import { api, ApiError } from '$lib/api';
+  import { api, getErrorMessage } from '$lib/api';
   import { refreshMe } from '$lib/me';
   import type { AuthResponse, MusicPlatform } from '$lib/types';
   import IconButton from '../components/IconButton.svelte';
@@ -54,7 +54,7 @@
       const personal = appState.lists.find((list) => list.kind === 'personal') ?? appState.lists[0];
       navigate(personal ? `/list/${personal.id}` : '/');
     } catch (err) {
-      formError = err instanceof ApiError ? err.message : (err as Error).message;
+      formError = getErrorMessage(err);
     } finally {
       submitting = false;
     }

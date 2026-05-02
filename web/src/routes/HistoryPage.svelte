@@ -1,6 +1,6 @@
 <script lang="ts">
   import { router, navigate } from '$lib/router.svelte';
-  import { api, ApiError } from '$lib/api';
+  import { api, getErrorMessage } from '$lib/api';
   import type { HistoryCompletion, HistoryPayload } from '$lib/types';
   import IconButton from '../components/IconButton.svelte';
   import Cover from '../components/Cover.svelte';
@@ -25,7 +25,7 @@
       })
       .catch((err: unknown) => {
         if (cancelled) return;
-        loadError = err instanceof ApiError ? err.message : (err as Error).message;
+        loadError = getErrorMessage(err);
       })
       .finally(() => {
         if (!cancelled) loading = false;
