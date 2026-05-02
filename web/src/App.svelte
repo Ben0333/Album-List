@@ -11,6 +11,7 @@
   import Login from './routes/Login.svelte';
   import Home from './routes/Home.svelte';
   import ListPage from './routes/ListPage.svelte';
+  import AlbumPage from './routes/AlbumPage.svelte';
   import Placeholder from './routes/Placeholder.svelte';
 
   let booted = $state<boolean>(false);
@@ -60,7 +61,11 @@
   {:else if router.current.type === 'home'}
     <Home />
   {:else if router.current.type === 'list'}
-    <ListPage />
+    {#if router.current.albumId !== null}
+      <AlbumPage />
+    {:else}
+      <ListPage />
+    {/if}
   {:else if router.current.type === 'share'}
     <Placeholder title="Shared list" note="Shared-list view port pending." />
   {:else if router.current.type === 'invite'}
