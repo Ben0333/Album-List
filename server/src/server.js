@@ -1,0 +1,3786 @@
+﻿import crypto from 'node:crypto';
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import bcrypt from 'bcryptjs';
+import compression from 'compression';
+import express from 'express';
+import helmet from 'helmet';
+import { albumKey, closeDatabase, db, normalizeText, nowIso, trackKey, transaction } from '@albums/shared/db';
+import { config } from '@albums/shared/config';
+import { exploreLists } from './explore-data.js';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const repoRoot = path.resolve(__dirname, '..', '..');
+const publicDir = path.join(repoRoot, 'web', 'dist');
+if (!fs.existsSync(path.join(publicDir, 'index.html'))) {
+  console.error(`web/dist/index.html missing at ${publicDir}. Run \`npm run build\` first.`);
+  process.exit(1);
+}
+const app = express();
+
+const avatarColors = ['#4f8cff', '#15b8a6', '#f59e0b', '#ef4444', '#8b5cf6', '#22c55e', '#f97316', '#06b6d4'];
+const safeMethods = new Set(['GET', 'HEAD', 'OPTIONS']);
+const rateLimitBuckets = new Map();
+let lastRateLimitSweep = 0;
+const musicPlatforms = new Set(['spotify', 'youtube_music', 'apple_music', 'tidal', 'soundcloud', 'bandcamp', 'deezer', 'na']);
+const platformAccents = {
+  spotify: '#1db954',
+  youtube_music: '#ff0033',
+  apple_music: '#fa243c',
+  tidal: '#00ffff',
+  soundcloud: '#ff5500',
+  bandcamp: '#1da0c3',
+  deezer: '#a238ff',
+  na: '#ff0033'
+};
+const exploreCoverMemoryCache = new Map();
+const albumSearchMemoryCache = new Map();
+const albumLookupMemoryCache = new Map();
+const albumLevelTrackKey = '__album__';
+const maxAlbumsPerList = 500;
+const metadataUserAgent = `AlbumsToListenTo/0.1 (${config.appOrigin})`;
+const metadataCacheMaxEntries = 250;
+const albumSearchCacheTtlMs = 5 * 60 * 1000;
+const albumLookupCacheTtlMs = 20 * 60 * 1000;
+let musicBrainzQueue = Promise.resolve();
+let lastMusicBrainzRequestAt = 0;
+
+app.disable('x-powered-by');
+app.set('trust proxy', config.trustProxy);
+
+app.use(
+  helmet({
+    contentSecurityPolicy: {
+      useDefaults: true,
+      directives: {
+        defaultSrc: ["'self'"],
+        scriptSrc: ["'self'"],
+        styleSrc: ["'self'", "'unsafe-inline'"],
+        imgSrc: ["'self'", 'data:', 'https:'],
+        connectSrc: ["'self'"],
+        objectSrc: ["'none'"],
+        baseUri: ["'self'"],
+        formAction: ["'self'"],
+        frameAncestors: ["'none'"],
+        upgradeInsecureRequests: config.isProduction ? [] : null
+      }
+    },
+    crossOriginEmbedderPolicy: false,
+    hsts: config.isProduction
+      ? {
+          maxAge: 15552000,
+          includeSubDomains: true,
+          preload: false
+        }
+      : false,
+    referrerPolicy: { policy: 'same-origin' }
+  })
+);
+
+app.use((req, res, next) => {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('Referrer-Policy', 'same-origin');
+  next();
+});
+
+app.use(compression());
+app.use(validateRequestOrigin);
+app.use(express.json({ limit: '2mb' }));
+app.use(loadSession);
+app.use(
+  express.static(publicDir, {
+    setHeaders(res, filePath) {
+      if (/[\\/]assets[\\/].+-[A-Za-z0-9_-]+\.(js|css|woff2?|ttf|otf|eot|svg|png|jpg|webp|avif)$/i.test(filePath)) {
+        res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+        return;
+      }
+      if (/\.(html|js|css|json)$/i.test(filePath)) {
+        res.setHeader('Cache-Control', 'no-cache');
+      }
+    }
+  })
+);
+
+function route(handler) {
+  return (req, res, next) => {
+    Promise.resolve(handler(req, res, next)).catch(next);
+  };
+}
+
+function httpError(status, message) {
+  const error = new Error(message);
+  error.status = status;
+  return error;
+}
+
+function cachePublic(res, maxAgeSeconds, staleSeconds = maxAgeSeconds) {
+  res.setHeader('Cache-Control', `public, max-age=${maxAgeSeconds}, stale-while-revalidate=${staleSeconds}`);
+}
+
+function rateLimitError(message, retryAfterSeconds) {
+  const error = httpError(429, message);
+  error.retryAfter = retryAfterSeconds;
+  return error;
+}
+
+function requestOrigin(req) {
+  const host = req.get('host');
+  if (!host) return config.appOrigin;
+  return `${req.protocol}://${host}`;
+}
+
+function originAllowed(origin, req) {
+  try {
+    const parsedOrigin = new URL(origin).origin;
+    return config.allowedOrigins.includes(parsedOrigin) || (!config.isProduction && parsedOrigin === requestOrigin(req));
+  } catch {
+    return false;
+  }
+}
+
+function validateRequestOrigin(req, res, next) {
+  if (!req.path.startsWith('/api/') || safeMethods.has(req.method)) {
+    next();
+    return;
+  }
+
+  const origin = req.get('origin');
+  if (origin) {
+    if (!originAllowed(origin, req)) throw httpError(403, 'Cross-origin requests are not allowed.');
+    next();
+    return;
+  }
+
+  const fetchSite = String(req.get('sec-fetch-site') || '').toLowerCase();
+  if (fetchSite === 'cross-site' || fetchSite === 'same-site') {
+    throw httpError(403, 'Cross-origin requests are not allowed.');
+  }
+  next();
+}
+
+function parseCookies(header = '') {
+  return Object.fromEntries(
+    header
+      .split(';')
+      .map((part) => part.trim())
+      .filter(Boolean)
+      .map((part) => {
+        const index = part.indexOf('=');
+        if (index === -1) return [part, ''];
+        try {
+          return [part.slice(0, index), decodeURIComponent(part.slice(index + 1))];
+        } catch {
+          return [part.slice(0, index), ''];
+        }
+      })
+  );
+}
+
+function clientIp(req) {
+  return req.ip || req.socket.remoteAddress || 'unknown';
+}
+
+function rateLimitIdentity(req) {
+  return req.user ? `user:${req.user.id}` : `ip:${clientIp(req)}`;
+}
+
+function sweepRateLimits(now) {
+  if (now - lastRateLimitSweep < 60_000) return;
+  lastRateLimitSweep = now;
+  for (const [key, bucket] of rateLimitBuckets.entries()) {
+    if (bucket.resetAt <= now) rateLimitBuckets.delete(key);
+  }
+}
+
+function enforceRateLimit(req, scope, { limit, windowMs, key = rateLimitIdentity(req), message = 'Too many requests. Try again shortly.' }) {
+  const now = Date.now();
+  sweepRateLimits(now);
+  const bucketKey = `${scope}:${key}`;
+  const current = rateLimitBuckets.get(bucketKey);
+  if (!current || current.resetAt <= now) {
+    rateLimitBuckets.set(bucketKey, { count: 1, resetAt: now + windowMs });
+    return;
+  }
+
+  current.count += 1;
+  if (current.count > limit) {
+    throw rateLimitError(message, Math.max(1, Math.ceil((current.resetAt - now) / 1000)));
+  }
+}
+
+function randomToken(bytes = 32) {
+  return crypto.randomBytes(bytes).toString('base64url');
+}
+
+function hashToken(token) {
+  return crypto.createHash('sha256').update(token).digest('hex');
+}
+
+function normalizeEmail(value) {
+  return String(value || '').trim().toLowerCase();
+}
+
+function clampText(value, maxLength) {
+  return String(value || '').trim().slice(0, maxLength);
+}
+
+function safeAvatarDataUrl(value) {
+  try {
+    return validateAvatarDataUrl(value);
+  } catch {
+    return '';
+  }
+}
+
+function avatarBytesMatchMime(mime, bytes) {
+  if (mime === 'png') {
+    return bytes.length >= 8 && bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47;
+  }
+  if (mime === 'jpeg') {
+    return bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff;
+  }
+  if (mime === 'webp') {
+    return bytes.length >= 12 && bytes.subarray(0, 4).toString('ascii') === 'RIFF' && bytes.subarray(8, 12).toString('ascii') === 'WEBP';
+  }
+  if (mime === 'gif') {
+    const signature = bytes.subarray(0, 6).toString('ascii');
+    return signature === 'GIF87a' || signature === 'GIF89a';
+  }
+  return false;
+}
+
+function safeExternalImageUrl(value) {
+  const text = String(value || '').trim();
+  if (!text || text.length > 700) return '';
+  try {
+    const url = new URL(text);
+    if (url.protocol === 'https:') return url.href;
+    if (!config.isProduction && url.protocol === 'http:' && ['localhost', '127.0.0.1', '::1'].includes(url.hostname)) {
+      return url.href;
+    }
+  } catch {
+    return '';
+  }
+  return '';
+}
+
+function validateCoverUrl(value) {
+  const text = String(value || '').trim();
+  if (!text) return '';
+  const safeUrl = safeExternalImageUrl(text);
+  if (!safeUrl) throw httpError(400, 'Cover image URL must be HTTPS.');
+  return safeUrl;
+}
+
+function publicUser(row, options = {}) {
+  if (!row) return null;
+  const musicPlatform = row.music_platform || 'na';
+  const user = {
+    id: row.id,
+    username: row.username,
+    avatarColor: row.avatar_color,
+    avatarUrl: safeAvatarDataUrl(row.avatar_data_url),
+    createdAt: row.created_at
+  };
+  if (options.includePrivate) {
+    user.email = row.email;
+    user.historyToken = row.history_token;
+    user.musicPlatform = musicPlatform;
+    user.accentColor = row.accent_color || platformAccent(musicPlatform);
+    user.accentCustom = Boolean(row.accent_color);
+    user.historyVisibility = row.history_visibility;
+    user.themePreference = row.theme_preference;
+  }
+  return user;
+}
+
+function normalizeMusicPlatform(value) {
+  const platform = String(value || 'na').trim().toLowerCase();
+  return musicPlatforms.has(platform) ? platform : 'na';
+}
+
+function platformAccent(value) {
+  return platformAccents[normalizeMusicPlatform(value)] || platformAccents.na;
+}
+
+function validateAccentColor(value) {
+  if (value === null || value === undefined || value === '') return '';
+  const color = String(value).trim().toLowerCase();
+  if (!/^#[0-9a-f]{6}$/.test(color)) {
+    throw httpError(400, 'Accent color must be a hex color like #1db954.');
+  }
+  return color;
+}
+
+function albumExternalUrl(album, platform = 'na') {
+  const query = encodeURIComponent(`${album.title || ''} ${album.artist || ''}`.trim());
+  const chosen = normalizeMusicPlatform(platform);
+  if (chosen === 'spotify') return `https://open.spotify.com/search/${query}`;
+  if (chosen === 'apple_music') return `https://music.apple.com/us/search?term=${query}`;
+  if (chosen === 'tidal') return `https://listen.tidal.com/search?q=${query}`;
+  if (chosen === 'soundcloud') return `https://soundcloud.com/search/albums?q=${query}`;
+  if (chosen === 'bandcamp') return `https://bandcamp.com/search?q=${query}&item_type=a`;
+  if (chosen === 'deezer') return `https://www.deezer.com/search/${query}/album`;
+  return `https://music.youtube.com/search?q=${query}`;
+}
+
+function validateAvatarDataUrl(value) {
+  const dataUrl = String(value || '').trim();
+  if (!dataUrl) return '';
+  if (dataUrl.length > 700_000) {
+    throw httpError(400, 'Profile picture is too large. Use an image under about 500 KB.');
+  }
+  const match = dataUrl.match(/^data:image\/(png|jpe?g|webp|gif);base64,([a-z0-9+/=]+)$/i);
+  if (!match) {
+    throw httpError(400, 'Profile picture must be a PNG, JPG, WEBP, or GIF image.');
+  }
+  const mime = match[1].toLowerCase() === 'jpg' ? 'jpeg' : match[1].toLowerCase();
+  const base64 = match[2];
+  const bytes = Buffer.from(base64, 'base64');
+  if (!bytes.length || bytes.length > 512_000 || !avatarBytesMatchMime(mime, bytes)) {
+    throw httpError(400, 'Profile picture must be a valid image under about 500 KB.');
+  }
+  return `data:image/${mime};base64,${base64}`;
+}
+
+function avatarFor(value) {
+  const normalized = normalizeText(value);
+  const first = normalized.charCodeAt(0) || 0;
+  return avatarColors[first % avatarColors.length];
+}
+
+function setSessionCookie(res, token) {
+  res.cookie(config.cookieName, token, {
+    httpOnly: true,
+    secure: config.cookieSecure,
+    sameSite: 'lax',
+    path: '/',
+    maxAge: config.sessionDays * 24 * 60 * 60 * 1000
+  });
+}
+
+function clearSessionCookie(res) {
+  res.clearCookie(config.cookieName, {
+    httpOnly: true,
+    secure: config.cookieSecure,
+    sameSite: 'lax',
+    path: '/'
+  });
+}
+
+function createSession(res, userId) {
+  const token = randomToken();
+  const tokenHash = hashToken(token);
+  const expiresAt = new Date(Date.now() + config.sessionDays * 24 * 60 * 60 * 1000).toISOString();
+
+  db.prepare(
+    `INSERT INTO sessions (token_hash, user_id, expires_at, created_at, last_seen_at)
+     VALUES (?, ?, ?, ?, ?)`
+  ).run(tokenHash, userId, expiresAt, nowIso(), nowIso());
+
+  setSessionCookie(res, token);
+}
+
+function deleteCurrentSession(req) {
+  if (req.sessionTokenHash) {
+    db.prepare('DELETE FROM sessions WHERE token_hash = ?').run(req.sessionTokenHash);
+    req.sessionTokenHash = null;
+  }
+}
+
+function replaceCurrentSession(req, res, userId) {
+  deleteCurrentSession(req);
+  createSession(res, userId);
+}
+
+function cleanupExpiredSessions() {
+  db.prepare('DELETE FROM sessions WHERE expires_at <= ?').run(nowIso());
+}
+
+function loadSession(req, res, next) {
+  const cookies = parseCookies(req.headers.cookie);
+  const token = cookies[config.cookieName];
+  req.user = null;
+  req.sessionTokenHash = null;
+
+  if (!token) {
+    next();
+    return;
+  }
+
+  const tokenHash = hashToken(token);
+  const row = db
+    .prepare(
+      `SELECT s.token_hash, s.expires_at, u.*
+       FROM sessions s
+       JOIN users u ON u.id = s.user_id
+       WHERE s.token_hash = ?`
+    )
+    .get(tokenHash);
+
+  if (!row || new Date(row.expires_at).getTime() <= Date.now()) {
+    db.prepare('DELETE FROM sessions WHERE token_hash = ?').run(tokenHash);
+    clearSessionCookie(res);
+    next();
+    return;
+  }
+
+  if (row.disabled_at) {
+    db.prepare('DELETE FROM sessions WHERE token_hash = ?').run(tokenHash);
+    clearSessionCookie(res);
+    next();
+    return;
+  }
+
+  req.user = publicUser(row, { includePrivate: true });
+  req.sessionTokenHash = tokenHash;
+  db.prepare('UPDATE sessions SET last_seen_at = ? WHERE token_hash = ?').run(nowIso(), tokenHash);
+  next();
+}
+
+function requireUser(req) {
+  if (!req.user) throw httpError(401, 'You need to log in first.');
+  return req.user;
+}
+
+function checkAuthThrottle(req) {
+  const windowMs = 10 * 60 * 1000;
+  enforceRateLimit(req, 'auth-ip', {
+    limit: 30,
+    windowMs,
+    key: `ip:${clientIp(req)}`,
+    message: 'Too many login attempts. Try again in a few minutes.'
+  });
+
+  const identifier = normalizeText(req.body?.identifier || req.body?.email || req.body?.username || '');
+  if (identifier) {
+    enforceRateLimit(req, 'auth-identifier', {
+      limit: 12,
+      windowMs,
+      key: `${clientIp(req)}:${identifier}`,
+      message: 'Too many login attempts. Try again in a few minutes.'
+    });
+  }
+}
+
+function limitAlbumSearch(req) {
+  enforceRateLimit(req, 'album-search', {
+    limit: 30,
+    windowMs: 60 * 1000,
+    message: 'Album search is temporarily rate limited. Try again shortly.'
+  });
+}
+
+function limitAlbumLookup(req) {
+  enforceRateLimit(req, 'album-lookup', {
+    limit: 60,
+    windowMs: 5 * 60 * 1000,
+    message: 'Album metadata lookup is temporarily rate limited. Try again shortly.'
+  });
+}
+
+function limitExploreCoverLookup(req) {
+  enforceRateLimit(req, 'explore-cover', {
+    limit: 80,
+    windowMs: 5 * 60 * 1000,
+    message: 'Cover lookup is temporarily rate limited. Try again shortly.'
+  });
+}
+
+function limitAvatarUpload(req) {
+  enforceRateLimit(req, 'avatar-upload', {
+    limit: 10,
+    windowMs: 60 * 60 * 1000,
+    message: 'Profile photo updates are temporarily rate limited. Try again later.'
+  });
+}
+
+function limitChatMessage(req) {
+  enforceRateLimit(req, 'chat-message', {
+    limit: 30,
+    windowMs: 60 * 1000,
+    message: 'Chat messages are temporarily rate limited. Try again shortly.'
+  });
+}
+
+function limitInviteSending(req) {
+  enforceRateLimit(req, 'invite-send', {
+    limit: 30,
+    windowMs: 60 * 60 * 1000,
+    message: 'Invite sending is temporarily rate limited. Try again later.'
+  });
+}
+
+function limitDbWrite(req, scope = 'db-write') {
+  enforceRateLimit(req, scope, {
+    limit: 180,
+    windowMs: 10 * 60 * 1000,
+    message: 'Changes are temporarily rate limited. Try again shortly.'
+  });
+}
+
+function validateAccountInput({ username, email, password, musicPlatform }) {
+  const cleanUsername = clampText(username, 30);
+  const cleanEmail = normalizeEmail(email);
+  const cleanPassword = String(password || '');
+
+  if (!/^[a-zA-Z0-9_ -]{3,30}$/.test(cleanUsername)) {
+    throw httpError(400, 'Username must be 3-30 characters and use letters, numbers, spaces, underscores, or dashes.');
+  }
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) {
+    throw httpError(400, 'Enter a valid email address.');
+  }
+  if (cleanPassword.length < 8) {
+    throw httpError(400, 'Password must be at least 8 characters.');
+  }
+
+  return { username: cleanUsername, email: cleanEmail, password: cleanPassword, musicPlatform: normalizeMusicPlatform(musicPlatform) };
+}
+
+function uniqueTokenFor(table, column) {
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    const token = randomToken(18);
+    const exists = db.prepare(`SELECT 1 FROM ${table} WHERE ${column} = ?`).get(token);
+    if (!exists) return token;
+  }
+  throw httpError(500, 'Could not create a unique token.');
+}
+
+function createList(ownerUserId, kind, name) {
+  const info = db
+    .prepare(
+      `INSERT INTO lists
+       (owner_user_id, kind, name, share_token, invite_token, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`
+    )
+    .run(
+      ownerUserId,
+      kind,
+      clampText(name || (kind === 'personal' ? 'Albums to Listen To' : 'Shared Albums'), 80),
+      uniqueTokenFor('lists', 'share_token'),
+      uniqueTokenFor('lists', 'invite_token'),
+      nowIso(),
+      nowIso()
+    );
+
+  db.prepare('INSERT INTO list_members (list_id, user_id, role, joined_at) VALUES (?, ?, ?, ?)').run(
+    info.lastInsertRowid,
+    ownerUserId,
+    'owner',
+    nowIso()
+  );
+
+  return Number(info.lastInsertRowid);
+}
+
+const ensurePersonalList = transaction((userId) => {
+  const existing = db.prepare('SELECT id FROM lists WHERE owner_user_id = ? AND kind = ?').get(userId, 'personal');
+  if (existing) return existing.id;
+  return createList(userId, 'personal', 'Albums to Listen To');
+});
+
+function getMember(listId, userId) {
+  if (!userId) return null;
+  return db
+    .prepare(
+      `SELECT lm.*, u.username, u.avatar_color
+       FROM list_members lm
+       JOIN users u ON u.id = lm.user_id
+       WHERE lm.list_id = ? AND lm.user_id = ?`
+    )
+    .get(listId, userId);
+}
+
+function getListOrThrow(listId) {
+  const list = db.prepare('SELECT * FROM lists WHERE id = ?').get(listId);
+  if (!list) throw httpError(404, 'List not found.');
+  return list;
+}
+
+function assertCanView(list, user, allowShare = false) {
+  const member = getMember(list.id, user?.id);
+  const publicReadable = list.visibility === 'public' || (allowShare && list.visibility === 'unlisted');
+  if (!member && !publicReadable) throw httpError(404, 'List not found.');
+  return member;
+}
+
+function assertCanEdit(list, user) {
+  const member = assertCanView(list, user);
+  if (!member || !['owner', 'editor'].includes(member.role)) {
+    throw httpError(403, 'You do not have edit access to this list.');
+  }
+  return member;
+}
+
+function assertCanManage(list, user) {
+  const member = assertCanView(list, user);
+  if (!member || member.role !== 'owner') {
+    throw httpError(403, 'Only the owner can manage this list.');
+  }
+  return member;
+}
+
+function getUserLists(userId) {
+  return db
+    .prepare(
+      `SELECT l.*,
+        lm.role,
+        owner.username AS owner_username,
+        COUNT(DISTINCT la.id) AS album_count,
+        COUNT(DISTINCT members.user_id) AS member_count
+       FROM list_members lm
+       JOIN lists l ON l.id = lm.list_id
+       JOIN users owner ON owner.id = l.owner_user_id
+       LEFT JOIN list_albums la ON la.list_id = l.id
+       LEFT JOIN list_members members ON members.list_id = l.id
+       WHERE lm.user_id = ?
+       GROUP BY l.id
+       ORDER BY l.kind = 'personal' DESC, l.updated_at DESC`
+    )
+    .all(userId)
+    .map(formatListSummary);
+}
+
+function getPendingInvites(userId) {
+  return db
+    .prepare(
+      `SELECT li.id, li.role, li.created_at, l.id AS list_id, l.name AS list_name,
+              inviter.username AS inviter_username, inviter.avatar_color AS inviter_avatar_color,
+              inviter.avatar_data_url AS inviter_avatar_data_url
+       FROM list_invites li
+       JOIN lists l ON l.id = li.list_id
+       JOIN users inviter ON inviter.id = li.inviter_user_id
+       WHERE li.invitee_user_id = ? AND li.status = 'pending'
+       ORDER BY li.created_at DESC`
+    )
+    .all(userId)
+    .map((invite) => ({
+      id: invite.id,
+      role: invite.role,
+      createdAt: invite.created_at,
+      listId: invite.list_id,
+      listName: invite.list_name,
+      inviterUsername: invite.inviter_username,
+      inviterAvatarColor: invite.inviter_avatar_color,
+      inviterAvatarUrl: safeAvatarDataUrl(invite.inviter_avatar_data_url)
+    }));
+}
+
+function searchUsers(query, viewerUserId) {
+  const raw = clampText(query, 120);
+  const normalized = normalizeText(raw);
+  if (normalized.length < 2 && !raw.includes('@')) return [];
+
+  const rows = [];
+  if (raw.includes('@')) {
+    const email = normalizeEmail(raw);
+    if (/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      rows.push(
+        ...db
+          .prepare(
+            `SELECT id, username, avatar_color, avatar_data_url
+             FROM users
+             WHERE id != ? AND email_normalized = ?
+               AND disabled_at IS NULL
+             LIMIT 1`
+          )
+          .all(viewerUserId || 0, email)
+      );
+    }
+  }
+
+  if (normalized.length >= 2) {
+    const like = `%${normalized}%`;
+    rows.push(
+      ...db
+        .prepare(
+          `SELECT id, username, avatar_color, avatar_data_url
+           FROM users
+           WHERE id != ? AND username_normalized LIKE ?
+             AND disabled_at IS NULL
+           ORDER BY username_normalized
+           LIMIT 10`
+        )
+        .all(viewerUserId || 0, like)
+    );
+  }
+
+  return uniqueBy(rows, (user) => user.id)
+    .slice(0, 10)
+    .map((user) => ({
+      id: user.id,
+      username: user.username,
+      avatarColor: user.avatar_color,
+      avatarUrl: safeAvatarDataUrl(user.avatar_data_url)
+    }));
+}
+
+function formatListSummary(row, options = {}) {
+  const summary = {
+    id: row.id,
+    ownerUserId: row.owner_user_id,
+    ownerUsername: row.owner_username,
+    kind: row.kind,
+    name: row.name,
+    description: row.description,
+    visibility: row.visibility,
+    showRatings: Boolean(row.show_ratings),
+    role: row.role,
+    albumCount: row.album_count || 0,
+    memberCount: row.member_count || 0,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
+  };
+  if (options.includeShareToken) summary.shareToken = row.share_token;
+  if (options.includeInviteToken) summary.inviteToken = row.invite_token;
+  return summary;
+}
+
+function listMembers(listId) {
+  return db
+    .prepare(
+      `SELECT lm.user_id, lm.role, lm.joined_at, u.username, u.avatar_color, u.avatar_data_url
+       FROM list_members lm
+       JOIN users u ON u.id = lm.user_id
+       WHERE lm.list_id = ?
+       ORDER BY lm.role = 'owner' DESC, u.username COLLATE NOCASE`
+    )
+    .all(listId)
+    .map((member) => ({
+      userId: member.user_id,
+      username: member.username,
+      avatarColor: member.avatar_color,
+      avatarUrl: safeAvatarDataUrl(member.avatar_data_url),
+      role: member.role,
+      joinedAt: member.joined_at
+    }));
+}
+
+function sanitizeTracks(value) {
+  const rawTracks = Array.isArray(value) ? value : [];
+  return rawTracks
+    .map((track, index) => ({
+      title: clampText(typeof track === 'string' ? track : track?.title, 160),
+      keyTitle: clampText(typeof track === 'string' ? track : track?.keyTitle || track?.title, 160),
+      position: Number(track?.position || index + 1)
+    }))
+    .filter((track) => track.title)
+    .slice(0, 80)
+    .map((track, index) => ({
+      title: track.title,
+      position: index + 1,
+      trackKey: trackKey(track.keyTitle || track.title, index + 1)
+    }));
+}
+
+function upgradeArtwork(url, size = 600) {
+  if (!url) return '';
+  return String(url).replace(/\/\d+x\d+bb\.(jpg|png|webp)$/i, `/${size}x${size}bb.$1`);
+}
+
+function itunesCountry(req) {
+  const country = String(req.query.country || 'US').trim().toUpperCase();
+  return /^[A-Z]{2}$/.test(country) ? country : 'US';
+}
+
+async function fetchJson(url) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 8000);
+  try {
+    const response = await fetch(url, {
+      signal: controller.signal,
+      headers: {
+        Accept: 'application/json',
+        'User-Agent': metadataUserAgent
+      }
+    });
+    if (!response.ok) throw httpError(502, 'Album metadata service is not responding.');
+    return await response.json();
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+function delay(ms) {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+}
+
+async function fetchMusicBrainzJson(url) {
+  const task = musicBrainzQueue.then(async () => {
+    const waitMs = Math.max(0, lastMusicBrainzRequestAt + 1100 - Date.now());
+    if (waitMs) await delay(waitMs);
+    lastMusicBrainzRequestAt = Date.now();
+    return fetchJson(url);
+  });
+  musicBrainzQueue = task.catch(() => {});
+  return task;
+}
+
+function cacheTextKey(value) {
+  return String(value || '').trim().toLowerCase().normalize('NFKC').slice(0, 160);
+}
+
+function pruneCache(cache) {
+  if (cache.size <= metadataCacheMaxEntries) return;
+  const now = Date.now();
+  for (const [key, entry] of cache.entries()) {
+    if (!entry.promise && entry.expiresAt <= now) cache.delete(key);
+  }
+  while (cache.size > metadataCacheMaxEntries) {
+    const firstKey = cache.keys().next().value;
+    if (firstKey === undefined) break;
+    cache.delete(firstKey);
+  }
+}
+
+async function cachedMetadata(cache, key, ttlMs, loader) {
+  const now = Date.now();
+  const existing = cache.get(key);
+  if (existing?.promise) return existing.promise;
+  if (existing && existing.expiresAt > now) return existing.value;
+
+  const promise = Promise.resolve()
+    .then(loader)
+    .then(
+      (value) => {
+        cache.set(key, { value, expiresAt: Date.now() + ttlMs });
+        pruneCache(cache);
+        return value;
+      },
+      (error) => {
+        if (cache.get(key)?.promise === promise) cache.delete(key);
+        throw error;
+      }
+    );
+
+  cache.set(key, { promise, expiresAt: now + ttlMs });
+  pruneCache(cache);
+  return promise;
+}
+
+async function imageUrlWorks(value) {
+  const safeUrl = safeExternalImageUrl(value);
+  if (!safeUrl) return false;
+  for (const method of ['HEAD', 'GET']) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 8000);
+    try {
+      const headers = {
+        Accept: 'image/*',
+        'User-Agent': metadataUserAgent
+      };
+      if (method === 'GET') headers.Range = 'bytes=0-4095';
+      const response = await fetch(safeUrl, {
+        method,
+        signal: controller.signal,
+        headers
+      });
+      const contentType = String(response.headers.get('content-type') || '').toLowerCase();
+      await response.body?.cancel?.();
+      if (response.ok && contentType.startsWith('image/')) return true;
+    } catch {
+      // Try the next probing method before giving up.
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+  return false;
+}
+
+async function spotifyAlbumCover(spotifyId) {
+  const id = String(spotifyId || '').trim();
+  if (!/^[a-zA-Z0-9]+$/.test(id)) return '';
+  const url = new URL('https://open.spotify.com/oembed');
+  url.searchParams.set('url', `https://open.spotify.com/album/${id}`);
+  const data = await fetchJson(url).catch(() => null);
+  return safeExternalImageUrl(data?.thumbnail_url);
+}
+
+function uniqueBy(items, keyFn) {
+  const seen = new Set();
+  const unique = [];
+  for (const item of items) {
+    const key = keyFn(item);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    unique.push(item);
+  }
+  return unique;
+}
+
+function compactIdentityText(value) {
+  return String(value || '')
+    .trim()
+    .toLowerCase()
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/&/g, 'and')
+    .replace(/[^a-z0-9]+/g, '');
+}
+
+function compactAlbumIdentity(title, artist) {
+  const compactTitle = compactIdentityText(title);
+  if (!compactTitle) return '';
+  return `${compactIdentityText(artist) || 'unknown'}::${compactTitle}`;
+}
+
+function japaneseScriptScore(value) {
+  return (String(value || '').match(/[\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Han}]/gu) || []).length;
+}
+
+function trackListJapaneseScore(tracks) {
+  return (tracks || []).reduce((total, track) => total + japaneseScriptScore(track?.title), 0);
+}
+
+function searchVariants(term) {
+  const query = clampText(term, 120);
+  const variants = [];
+  const normalized = normalizeText(query);
+  const words = normalized.split(' ').filter(Boolean);
+  const fuzzyWords = words.map((word) => (word.endsWith('os') && word.length > 3 ? `${word.slice(0, -2)}oes` : word));
+  const fuzzy = fuzzyWords.join(' ');
+  if (fuzzy && fuzzy !== normalized) variants.push(fuzzy);
+  variants.push(query);
+  if (normalized && normalized !== query.toLowerCase().trim()) variants.push(normalized);
+  if (!/\balbum\b/i.test(query)) variants.push(`${query} album`);
+  return uniqueBy(variants.filter((variant) => variant.trim().length >= 2), (variant) => normalizeText(variant));
+}
+
+function musicBrainzPhrase(value) {
+  const phrase = String(value || '')
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/&/g, ' and ')
+    .replace(/[^a-zA-Z0-9]+/g, ' ')
+    .trim()
+    .replace(/\s+/g, ' ');
+  return phrase ? `"${phrase}"` : '';
+}
+
+function musicBrainzFieldClause(field, value) {
+  const phrase = musicBrainzPhrase(value);
+  return phrase ? `${field}:${phrase}` : '';
+}
+
+function musicBrainzFuzzyFieldClause(field, value) {
+  const words = normalizeText(value).split(' ').filter(Boolean);
+  if (words.length !== 1) return '';
+  const [word] = words;
+  if (word.length < 3 || word.length > 16) return '';
+  return `${field}:${word}~`;
+}
+
+function musicBrainzFuzzyWordsClause(field, value) {
+  const words = rankingWords(value)
+    .filter((word) => word.length >= 4 && word.length <= 16)
+    .slice(0, 6);
+  if (!words.length) return '';
+  return `(${words.map((word) => `${field}:${word}~`).join(' AND ')})`;
+}
+
+function musicBrainzFieldClauseOptions(field, value, { fuzzy = false } = {}) {
+  return uniqueBy(
+    [
+      musicBrainzFieldClause(field, value),
+      fuzzy ? musicBrainzFuzzyFieldClause(field, value) : '',
+      fuzzy ? musicBrainzFuzzyWordsClause(field, value) : ''
+    ].filter(Boolean),
+    (clause) => clause
+  );
+}
+
+function titleArtistSplitCandidates(term) {
+  const words = normalizeText(term).split(' ').filter(Boolean);
+  if (words.length < 2) return [];
+
+  const candidates = [];
+  for (let index = 1; index < words.length; index += 1) {
+    const left = words.slice(0, index);
+    const right = words.slice(index);
+    candidates.push({ title: left.join(' '), artist: right.join(' '), titleWords: left.length, artistWords: right.length });
+    candidates.push({ title: right.join(' '), artist: left.join(' '), titleWords: right.length, artistWords: left.length });
+  }
+
+  return uniqueBy(candidates, (candidate) => `${candidate.title}::${candidate.artist}`)
+    .sort((left, right) => splitCandidateScore(right) - splitCandidateScore(left))
+    .slice(0, 8);
+}
+
+function splitCandidateScore(candidate) {
+  let score = 0;
+  if (candidate.titleWords <= 4) score += 20 - candidate.titleWords;
+  if (candidate.artistWords <= 5) score += 16 - candidate.artistWords;
+  if (candidate.titleWords === 1) score += 4;
+  if (candidate.artistWords >= 2) score += 3;
+  return score;
+}
+
+function musicBrainzReleaseSearchQuery(term) {
+  const query = clampText(term, 120);
+  const clauses = [
+    musicBrainzFieldClause('release', query),
+    musicBrainzFuzzyWordsClause('release', query),
+    musicBrainzFieldClause('artist', query),
+    musicBrainzFuzzyFieldClause('artist', query),
+    musicBrainzFuzzyWordsClause('artist', query)
+  ].filter(Boolean);
+
+  for (const candidate of titleArtistSplitCandidates(query)) {
+    const releaseClauses = musicBrainzFieldClauseOptions('release', candidate.title, { fuzzy: candidate.titleWords <= 4 });
+    const artistClauses = musicBrainzFieldClauseOptions('artist', candidate.artist, { fuzzy: candidate.artistWords <= 3 });
+    for (const releaseClause of releaseClauses) {
+      for (const artistClause of artistClauses) {
+        clauses.push(`${releaseClause} AND ${artistClause}`);
+      }
+    }
+  }
+
+  const uniqueClauses = uniqueBy(clauses, (clause) => clause).slice(0, 14);
+  if (!uniqueClauses.length) return '';
+  return `(${uniqueClauses.map((clause) => `(${clause})`).join(' OR ')}) AND (primarytype:album OR primarytype:ep)`;
+}
+
+function specialAlbumMatches(term) {
+  const normalized = normalizeText(term);
+  const queryWordCount = rankingWords(term).length;
+  const matches = [];
+  const manWhoSoldTheWorldMatch = fuzzyPhraseInQuery(term, 'the man who sold the world');
+  const manWhoSoldTheWorldOnly = queryWordCount <= rankingWords('the man who sold the world').length + 1;
+  if (
+    manWhoSoldTheWorldMatch &&
+    (normalized.includes('bowie') || fuzzyPhraseInQuery(term, 'david bowie') || manWhoSoldTheWorldOnly)
+  ) {
+    matches.push({
+      provider: 'musicbrainz',
+      providerId: 'mb:8784de2f-5754-3bcf-8b2a-35d327ef74a1',
+      title: 'The Man Who Sold the World',
+      artist: 'David Bowie',
+      releaseYear: 1970,
+      trackCount: 9,
+      coverUrl: 'https://coverartarchive.org/release/8784de2f-5754-3bcf-8b2a-35d327ef74a1/front-500',
+      sourceUrl: 'https://musicbrainz.org/release/8784de2f-5754-3bcf-8b2a-35d327ef74a1'
+    });
+  }
+  if (fuzzyPhraseInQuery(term, 'blackstar') || term.includes('★')) {
+    matches.push({
+      provider: 'musicbrainz',
+      providerId: 'mb:8eb5ae9e-ba52-4a8f-8513-822a5ccde819',
+      title: 'Blackstar (★)',
+      artist: 'David Bowie',
+      releaseYear: 2016,
+      trackCount: 7,
+      coverUrl: 'https://coverartarchive.org/release/8eb5ae9e-ba52-4a8f-8513-822a5ccde819/front-500',
+      sourceUrl: 'https://musicbrainz.org/release/8eb5ae9e-ba52-4a8f-8513-822a5ccde819'
+    });
+  }
+  if (/\b(heroes|heros)\b/.test(normalized)) {
+    matches.push({
+      provider: 'itunes',
+      providerId: '1347894082',
+      title: '"Heroes" (2017 Remaster)',
+      artist: 'David Bowie',
+      releaseYear: 1977,
+      trackCount: 10,
+      coverUrl: 'https://is1-ssl.mzstatic.com/image/thumb/Music115/v4/e2/65/b2/e265b2ae-48d5-9dd8-0251-6cd6c6c4eb53/190295842826.jpg/600x600bb.jpg',
+      sourceUrl: 'https://music.apple.com/us/album/heroes-2017-remaster/1347894082?uo=4'
+    });
+  }
+  return matches;
+}
+
+function musicBrainzArtistCreditName(artistCredits = []) {
+  return artistCredits
+    .map((credit) => `${credit.name || credit.artist?.name || ''}${credit.joinphrase || ''}`)
+    .join('')
+    .trim();
+}
+
+function formatItunesAlbum(result) {
+  return {
+    provider: 'itunes',
+    providerId: String(result.collectionId),
+    title: result.collectionName || '',
+    artist: result.artistName || '',
+    releaseYear: result.releaseDate ? new Date(result.releaseDate).getUTCFullYear() : null,
+    trackCount: result.trackCount || 0,
+    coverUrl: safeExternalImageUrl(upgradeArtwork(result.artworkUrl100 || result.artworkUrl60 || '', 600)),
+    sourceUrl: result.collectionViewUrl || ''
+  };
+}
+
+function formatItunesSongAlbum(result) {
+  return {
+    provider: 'itunes',
+    providerId: String(result.collectionId),
+    title: result.collectionName || '',
+    artist: result.artistName || '',
+    releaseYear: result.releaseDate ? new Date(result.releaseDate).getUTCFullYear() : null,
+    trackCount: 0,
+    coverUrl: safeExternalImageUrl(upgradeArtwork(result.artworkUrl100 || result.artworkUrl60 || '', 600)),
+    sourceUrl: result.collectionViewUrl || ''
+  };
+}
+
+function formatMusicBrainzSearchAlbum(result) {
+  const releaseGroup = result['release-group'] || {};
+  const releaseDate = result.date || releaseGroup['first-release-date'] || '';
+  return {
+    provider: 'musicbrainz',
+    providerId: `mb:${result.id}`,
+    title: releaseGroup.title || result.title || '',
+    artist: musicBrainzArtistCreditName(result['artist-credit']) || '',
+    releaseYear: releaseDate ? Number(String(releaseDate).slice(0, 4)) : null,
+    trackCount: result['track-count'] || 0,
+    coverUrl: safeExternalImageUrl(`https://coverartarchive.org/release/${result.id}/front-500`),
+    sourceUrl: `https://musicbrainz.org/release/${result.id}`,
+    releaseGroupId: releaseGroup.id || ''
+  };
+}
+
+function likelyNonAlbumRelease(title) {
+  const normalized = normalizeText(title);
+  return /\b(single|ep|soundtrack|best of|collection|live|karaoke|tribute)\b/.test(normalized);
+}
+
+const rankingStopWords = new Set([
+  'a',
+  'an',
+  'the',
+  'in',
+  'on',
+  'of',
+  'and',
+  'to',
+  'for',
+  'with',
+  'from',
+  'album',
+  'albums',
+  'remaster',
+  'remastered',
+  'deluxe',
+  'edition',
+  'expanded',
+  'anniversary',
+  'explicit',
+  'clean',
+  'single',
+  'ep',
+  'live',
+  'version',
+  'versions'
+]);
+
+function fuzzyPhraseInQuery(query, phrase) {
+  const queryWords = rankingWords(query);
+  const phraseWords = rankingWords(phrase);
+  if (!phraseWords.length) return false;
+  return wordCoverage(phraseWords, queryWords) >= Math.max(0.75, 1 - 1 / phraseWords.length);
+}
+
+function rankingWords(value) {
+  return normalizeText(value)
+    .split(' ')
+    .filter((word) => word && !rankingStopWords.has(word));
+}
+
+function editDistanceWithinOne(left, right) {
+  if (left === right) return true;
+  if (Math.abs(left.length - right.length) > 1) return false;
+  let edits = 0;
+  let leftIndex = 0;
+  let rightIndex = 0;
+
+  while (leftIndex < left.length && rightIndex < right.length) {
+    if (left[leftIndex] === right[rightIndex]) {
+      leftIndex += 1;
+      rightIndex += 1;
+      continue;
+    }
+    edits += 1;
+    if (edits > 1) return false;
+    if (left.length > right.length) leftIndex += 1;
+    else if (right.length > left.length) rightIndex += 1;
+    else {
+      leftIndex += 1;
+      rightIndex += 1;
+    }
+  }
+
+  return true;
+}
+
+function wordsMatch(left, right) {
+  if (!left || !right) return false;
+  if (left === right) return true;
+  if (left.length >= 4 && right.length >= 4 && (left.includes(right) || right.includes(left))) return true;
+  if (Math.min(left.length, right.length) >= 4 && editDistanceWithinOne(left, right)) return true;
+  return false;
+}
+
+function wordCoverage(needles, haystack) {
+  if (!needles.length) return 0;
+  let matches = 0;
+  for (const needle of needles) {
+    if (haystack.some((word) => wordsMatch(needle, word))) matches += 1;
+  }
+  return matches / needles.length;
+}
+
+function scoreTitleArtistCoverage(title, artist, query) {
+  const queryWords = rankingWords(query);
+  const titleWords = rankingWords(title);
+  const artistWords = rankingWords(artist);
+  const combinedWords = [...titleWords, ...artistWords];
+  const queryCoverage = wordCoverage(queryWords, combinedWords);
+  const titleCoverage = wordCoverage(titleWords, queryWords);
+  const artistCoverage = wordCoverage(artistWords, queryWords);
+
+  let score = queryCoverage * 360 + titleCoverage * 260 + artistCoverage * 180;
+  if (titleCoverage >= 0.99 && artistCoverage >= 0.66 && queryCoverage >= 0.75) score += 520;
+  else if (titleCoverage >= 0.99 && queryCoverage >= 0.45) score += 240;
+  if (!titleCoverage && artistCoverage >= 0.99) score += 80;
+  return score;
+}
+
+function scoreItunesResult(result, query) {
+  const normalizedQuery = normalizeText(query);
+  const collection = normalizeText(result.collectionName);
+  const track = normalizeText(result.trackName);
+  const artist = normalizeText(result.artistName);
+  const trackCount = Number(result.trackCount || 0);
+  const nonAlbumRelease = likelyNonAlbumRelease(result.collectionName);
+  let score = 0;
+  if (result.wrapperType === 'track') {
+    score += nonAlbumRelease ? 40 : 210;
+    if (track === normalizedQuery) score += 180;
+    else if (track.includes(normalizedQuery)) score += 90;
+    if (!nonAlbumRelease) score += 90;
+    if (artist !== normalizedQuery) score -= 180;
+  } else {
+    score += 120;
+    if (collection === normalizedQuery) score += 160;
+    else if (collection.includes(normalizedQuery)) score += 70;
+    if (trackCount >= 6 && trackCount <= 30) score += 150;
+    else if (trackCount > 0 && trackCount <= 2) score -= 120;
+  }
+  score += scoreTitleArtistCoverage(result.collectionName, result.artistName, query);
+  if (artist === normalizedQuery) score += 540;
+  else if (artist.includes(normalizedQuery)) score += 40;
+  if (nonAlbumRelease) score -= 360;
+  return score;
+}
+
+function scoreMusicBrainzResult(result, query) {
+  const normalizedQuery = normalizeText(query);
+  const title = normalizeText(result.title || result['release-group']?.title);
+  const artist = normalizeText(musicBrainzArtistCreditName(result['artist-credit']));
+  const releaseGroup = result['release-group'] || {};
+  const secondaryTypes = new Set(releaseGroup['secondary-types'] || []);
+  const primaryType = normalizeText(releaseGroup['primary-type']);
+  const releaseYear = result.date ? Number(String(result.date).slice(0, 4)) : null;
+  const trackCount = Number(result['track-count'] || 0);
+  const mediumCount = Array.isArray(result.media) ? result.media.length : 0;
+  let score = Number(result.score || 0);
+  if (result.status === 'Official') score += 130;
+  else if (result.status === 'Bootleg') score -= 240;
+  else score -= 130;
+  if (result.country === 'XW') score += 4;
+  else if (result.country === 'US') score += 2;
+  if (primaryType === 'album') score += 90;
+  else if (primaryType === 'ep') score += 22;
+  if (primaryType === 'ep' && trackCount >= 3 && trackCount <= 12) score += 28;
+  else if (primaryType === 'album' && trackCount >= 6 && trackCount <= 30) score += 18;
+  if (trackCount) score += Math.min(trackCount, 30) * 2;
+  if (mediumCount > 1) score += Math.min(mediumCount, 4) * 12;
+  if (trackCount > 40) score -= 120;
+  if (artist === normalizedQuery) score += 140;
+  else if (artist.includes(normalizedQuery)) score += 70;
+  if (title === normalizedQuery) score += 110;
+  else if (title.includes(normalizedQuery)) score += 45;
+  score += scoreTitleArtistCoverage(result.title || result['release-group']?.title, artist, query);
+  if (Number.isInteger(releaseYear)) score += Math.max(0, 40 - Math.max(0, releaseYear - 1950) * 0.35);
+  else score -= 50;
+  if (secondaryTypes.has('Live')) score -= 180;
+  if (secondaryTypes.has('Compilation')) score -= 80;
+  if (secondaryTypes.has('Single')) score -= 360;
+  if (likelyNonAlbumRelease(result.title || releaseGroup.title)) score -= 300;
+  return score;
+}
+
+async function searchMusicBrainzAlbums(term) {
+  const query = clampText(term, 120);
+  if (query.length < 2) return [];
+  const search = musicBrainzReleaseSearchQuery(query);
+  if (!search) return [];
+  const url = new URL('https://musicbrainz.org/ws/2/release');
+  url.searchParams.set('query', search);
+  url.searchParams.set('fmt', 'json');
+  url.searchParams.set('limit', '20');
+  const data = await fetchMusicBrainzJson(url);
+  return (data.releases || [])
+    .filter((result) => result.id && result.title)
+    .map((result) => ({
+      ...formatMusicBrainzSearchAlbum(result),
+      score: scoreMusicBrainzResult(result, query)
+    }));
+}
+
+async function searchItunesAlbums(query, country = 'US') {
+  const searches = [];
+  for (const variant of searchVariants(query)) {
+    const albumUrl = new URL('https://itunes.apple.com/search');
+    albumUrl.searchParams.set('term', variant);
+    albumUrl.searchParams.set('media', 'music');
+    albumUrl.searchParams.set('entity', 'album');
+    albumUrl.searchParams.set('limit', '18');
+    albumUrl.searchParams.set('country', country);
+    searches.push(fetchJson(albumUrl));
+
+    const songUrl = new URL('https://itunes.apple.com/search');
+    songUrl.searchParams.set('term', variant);
+    songUrl.searchParams.set('media', 'music');
+    songUrl.searchParams.set('entity', 'song');
+    songUrl.searchParams.set('limit', '18');
+    songUrl.searchParams.set('country', country);
+    searches.push(fetchJson(songUrl));
+  }
+
+  const settledSearches = await Promise.allSettled(searches);
+  return settledSearches
+    .flatMap((result) => (result.status === 'fulfilled' ? result.value.results || [] : []))
+    .map((result) => ({
+      ...(result.wrapperType === 'track' ? formatItunesSongAlbum(result) : formatItunesAlbum(result)),
+      score: scoreItunesResult(result, query)
+    }))
+    .filter((album) => album.title);
+}
+
+async function searchAlbumsUncached(term, country = 'US') {
+  const query = clampText(term, 120);
+  if (query.length < 2) return [];
+  const specialMatches = specialAlbumMatches(query);
+  const [itunesMatches, musicBrainzMatches] = await Promise.allSettled([searchItunesAlbums(query, country), searchMusicBrainzAlbums(query)]);
+  const results = [
+    ...specialMatches.map((album) => ({ ...album, score: 5000 })),
+    ...(itunesMatches.status === 'fulfilled' ? itunesMatches.value : []),
+    ...(musicBrainzMatches.status === 'fulfilled' ? musicBrainzMatches.value : [])
+  ];
+
+  return collapseAlbumSearchResults(results)
+    .slice(0, 10)
+    .map(({ score, releaseGroupId, groupScore, qualityScore, ...album }) => album);
+}
+
+async function searchAlbums(term, country = 'US') {
+  const key = `${String(country || 'US').toUpperCase()}:${cacheTextKey(term)}`;
+  return cachedMetadata(albumSearchMemoryCache, key, albumSearchCacheTtlMs, () => searchAlbumsUncached(term, country));
+}
+
+function albumSearchQualityScore(album) {
+  const trackCount = Number(album.trackCount || 0);
+  let score = 0;
+  if (album.provider === 'itunes') score += 90;
+  else if (album.provider === 'musicbrainz') score += 25;
+  if (trackCount) score += Math.min(trackCount, 40) * 3;
+  if (trackCount >= 6 && trackCount <= 30) score += 90;
+  else if (trackCount > 0 && trackCount <= 2) score -= 120;
+  if (album.releaseYear) score += 25;
+  else score -= 20;
+  if (safeExternalImageUrl(album.coverUrl)) score += 10;
+  if (likelyNonAlbumRelease(album.title)) score -= 220;
+  return score;
+}
+
+function collapseAlbumSearchResults(results) {
+  const groups = new Map();
+  for (const album of results.filter((item) => item.title)) {
+    const key = compactAlbumIdentity(album.title, album.artist) || album.releaseGroupId || `${album.provider}:${album.providerId}`;
+    const group = groups.get(key);
+    if (group) group.push(album);
+    else groups.set(key, [album]);
+  }
+
+  return Array.from(groups.values())
+    .map((group) => {
+      const groupScore = Math.max(...group.map((album) => Number(album.score || 0)));
+      const trackCountMode = mostCommonTrackCount(group);
+      const ranked = group
+        .map((album) => ({
+          ...album,
+          groupScore,
+          qualityScore: albumSearchQualityScore(album) + canonicalTrackCountScore(album, trackCountMode)
+        }))
+        .sort((left, right) => right.qualityScore - left.qualityScore || Number(right.score || 0) - Number(left.score || 0));
+      return ranked[0];
+    })
+    .sort((left, right) => right.groupScore - left.groupScore || right.qualityScore - left.qualityScore);
+}
+
+function mostCommonTrackCount(group) {
+  const counts = new Map();
+  for (const album of group) {
+    const trackCount = Number(album.trackCount || 0);
+    if (!trackCount) continue;
+    counts.set(trackCount, (counts.get(trackCount) || 0) + 1);
+  }
+  let bestCount = 0;
+  let bestFrequency = 0;
+  for (const [trackCount, frequency] of counts.entries()) {
+    if (frequency > bestFrequency || (frequency === bestFrequency && trackCount < bestCount)) {
+      bestCount = trackCount;
+      bestFrequency = frequency;
+    }
+  }
+  return bestCount;
+}
+
+function canonicalTrackCountScore(album, trackCountMode) {
+  const trackCount = Number(album.trackCount || 0);
+  if (!trackCount || !trackCountMode) return 0;
+  if (trackCount === trackCountMode) return 90;
+  return -Math.min(160, Math.abs(trackCount - trackCountMode) * 28);
+}
+
+async function lookupAlbumUncached(providerId, country = 'US') {
+  if (String(providerId || '').startsWith('mb:')) {
+    return lookupMusicBrainzRelease(String(providerId).slice(3));
+  }
+  const id = String(providerId || '').replace(/[^0-9]/g, '');
+  if (!id) throw httpError(400, 'Album id is required.');
+  const albumData = await lookupItunesAlbumData(id, country);
+  return publicLookupAlbum(await applyNativeItunesTrackTitles(id, country, albumData));
+}
+
+function publicLookupAlbum(albumData) {
+  const { collection, ...album } = albumData;
+  return album;
+}
+
+async function lookupItunesAlbumData(id, country = 'US', lang = '') {
+  const url = new URL('https://itunes.apple.com/lookup');
+  url.searchParams.set('id', id);
+  url.searchParams.set('entity', 'song');
+  url.searchParams.set('country', country);
+  if (lang) url.searchParams.set('lang', lang);
+  const data = await fetchJson(url);
+  const collection = (data.results || []).find((result) => result.wrapperType === 'collection');
+  if (!collection) throw httpError(404, 'Album metadata not found.');
+  const tracks = (data.results || [])
+    .filter((result) => result.wrapperType === 'track' && result.kind === 'song')
+    .sort((a, b) => (a.discNumber || 1) - (b.discNumber || 1) || (a.trackNumber || 0) - (b.trackNumber || 0))
+    .map((track, index) => ({
+      title: clampText(track.trackName, 160),
+      keyTitle: clampText(track.trackName, 160),
+      position: index + 1
+    }))
+    .filter((track) => track.title);
+
+  return {
+    ...formatItunesAlbum(collection),
+    collection,
+    tracks
+  };
+}
+
+async function applyNativeItunesTrackTitles(id, country, albumData) {
+  const baseTracks = albumData.tracks || [];
+  if (String(country || 'US').toUpperCase() !== 'JP' && baseTracks.length) {
+    const japaneseAlbumData = await lookupItunesAlbumData(id, 'JP', 'ja_jp').catch(() => null);
+    if (canUseJapaneseItunesTracks(albumData, japaneseAlbumData)) {
+      return {
+        ...albumData,
+        tracks: overlayTrackTitles(baseTracks, japaneseAlbumData.tracks)
+      };
+    }
+  }
+
+  return albumData;
+}
+
+function canUseJapaneseItunesTracks(baseAlbum, japaneseAlbum) {
+  const baseTracks = baseAlbum?.tracks || [];
+  const japaneseTracks = japaneseAlbum?.tracks || [];
+  const baseCollection = baseAlbum?.collection;
+  const japaneseCollection = japaneseAlbum?.collection;
+  if (!baseCollection || !japaneseCollection || String(baseCollection.collectionId) !== String(japaneseCollection.collectionId)) return false;
+  if (!baseTracks.length || baseTracks.length !== japaneseTracks.length) return false;
+  if (trackListJapaneseScore(japaneseTracks) <= trackListJapaneseScore(baseTracks)) return false;
+  return compactAlbumIdentity(baseCollection.collectionName, baseCollection.artistName) === compactAlbumIdentity(
+    japaneseCollection.collectionName,
+    japaneseCollection.artistName
+  );
+}
+
+function overlayTrackTitles(baseTracks, titleTracks) {
+  return baseTracks.map((track, index) => ({
+    ...track,
+    title: titleTracks[index]?.title || track.title,
+    keyTitle: track.keyTitle || track.title
+  }));
+}
+
+async function lookupAlbum(providerId, country = 'US') {
+  const key = `${String(country || 'US').toUpperCase()}:${cacheTextKey(providerId)}`;
+  return cachedMetadata(albumLookupMemoryCache, key, albumLookupCacheTtlMs, () => lookupAlbumUncached(providerId, country));
+}
+
+async function lookupMusicBrainzRelease(releaseId) {
+  const id = String(releaseId || '').trim();
+  if (!/^[0-9a-f-]{36}$/i.test(id)) throw httpError(400, 'Album id is required.');
+  const url = new URL(`https://musicbrainz.org/ws/2/release/${id}`);
+  url.searchParams.set('inc', 'recordings+artist-credits+release-groups');
+  url.searchParams.set('fmt', 'json');
+  const data = await fetchMusicBrainzJson(url);
+  const tracks = (data.media || [])
+    .flatMap((medium) => medium.tracks || [])
+    .map((track, index) => ({
+      title: clampText(track.title || track.recording?.title, 160),
+      position: index + 1
+    }))
+    .filter((track) => track.title);
+
+  return {
+    provider: 'musicbrainz',
+    providerId: `mb:${id}`,
+    title: data.title === '★' ? 'Blackstar (★)' : data.title,
+    artist: musicBrainzArtistCreditName(data['artist-credit']) || '',
+    releaseYear: data.date ? Number(String(data.date).slice(0, 4)) : null,
+    trackCount: tracks.length,
+    coverUrl: safeExternalImageUrl(`https://coverartarchive.org/release/${id}/front-500`),
+    sourceUrl: `https://musicbrainz.org/release/${id}`,
+    tracks
+  };
+}
+
+function scoreCoverCandidate(album, title, artist) {
+  const candidateTitle = normalizeText(album.title);
+  const candidateArtist = normalizeText(album.artist);
+  const targetTitle = normalizeText(title);
+  const targetArtist = normalizeText(artist);
+  let score = 0;
+  if (candidateTitle === targetTitle) score += 500;
+  else if (candidateTitle.includes(targetTitle) || targetTitle.includes(candidateTitle)) score += 220;
+  if (targetArtist) {
+    if (candidateArtist === targetArtist) score += 300;
+    else if (candidateArtist.includes(targetArtist) || targetArtist.includes(candidateArtist)) score += 130;
+  }
+  if (album.provider === 'itunes') score += 20;
+  return score;
+}
+
+async function albumCoverCandidates(title, artist, country = 'US') {
+  const query = `${title || ''} ${artist || ''}`.trim();
+  if (query.length < 2) return [];
+  const results = await searchAlbums(query, country).catch(() => []);
+  return uniqueBy(
+    results
+      .filter((album) => safeExternalImageUrl(album.coverUrl))
+      .sort((a, b) => scoreCoverCandidate(b, title, artist) - scoreCoverCandidate(a, title, artist)),
+    (album) => safeExternalImageUrl(album.coverUrl)
+  );
+}
+
+async function resolveVerifiedAlbumCover(title, artist, country = 'US', excludedUrls = []) {
+  const excluded = new Set(excludedUrls.map(safeExternalImageUrl).filter(Boolean));
+  for (const album of await albumCoverCandidates(title, artist, country)) {
+    const coverUrl = safeExternalImageUrl(album.coverUrl);
+    if (!coverUrl || excluded.has(coverUrl)) continue;
+    if (await imageUrlWorks(coverUrl)) return coverUrl;
+  }
+  return '';
+}
+
+function insertAlbum(listId, userId, albumInput) {
+  const title = clampText(albumInput?.title, 160);
+  if (!title) throw httpError(400, 'Album title is required.');
+
+  const artist = clampText(albumInput?.artist, 160);
+  const coverUrl = validateCoverUrl(albumInput?.coverUrl || albumInput?.cover_url);
+  const notes = clampText(albumInput?.notes, 1200);
+  const key = albumKey(title, artist);
+  const tracks = sanitizeTracks(albumInput?.tracks);
+  const existing = findAlbumInList(listId, title, artist);
+  if (existing) {
+    updateExistingAlbumFromInput(existing, { artist, coverUrl, tracks }, listId);
+    return Number(existing.id);
+  }
+  const albumCount = db.prepare('SELECT COUNT(*) AS count FROM list_albums WHERE list_id = ?').get(listId).count || 0;
+  if (albumCount >= maxAlbumsPerList) {
+    throw httpError(400, `Lists are limited to ${maxAlbumsPerList} albums for the beta.`);
+  }
+  const maxOrder = db.prepare('SELECT COALESCE(MAX(sort_order), 0) AS max_order FROM list_albums WHERE list_id = ?').get(listId)
+    .max_order;
+
+  const info = db
+    .prepare(
+      `INSERT INTO list_albums
+       (list_id, album_key, title, artist, cover_url, notes, sort_order, created_by, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    )
+    .run(listId, key, title, artist, coverUrl, notes, maxOrder + 1, userId, nowIso(), nowIso());
+
+  const insertTrack = db.prepare(
+    `INSERT INTO album_tracks (list_album_id, track_key, title, position)
+     VALUES (?, ?, ?, ?)`
+  );
+  for (const track of tracks) {
+    insertTrack.run(info.lastInsertRowid, track.trackKey, track.title, track.position);
+  }
+
+  return Number(info.lastInsertRowid);
+}
+
+function replaceAlbumTracks(listAlbumId, tracks) {
+  db.prepare('DELETE FROM album_tracks WHERE list_album_id = ?').run(listAlbumId);
+  const insertTrack = db.prepare(
+    `INSERT INTO album_tracks (list_album_id, track_key, title, position)
+     VALUES (?, ?, ?, ?)`
+  );
+  for (const track of sanitizeTracks(tracks)) {
+    insertTrack.run(listAlbumId, track.trackKey, track.title, track.position);
+  }
+}
+
+function syncTrackRatingTitles(albumKeyValue, tracks) {
+  const updateRatingTitle = db.prepare(
+    `UPDATE track_ratings
+     SET track_title = ?
+     WHERE album_key = ? AND track_key = ?`
+  );
+  for (const track of tracks) {
+    updateRatingTitle.run(track.title, albumKeyValue, track.trackKey);
+  }
+}
+
+function existingTrackRows(listAlbumId) {
+  return db.prepare('SELECT track_key, title, position FROM album_tracks WHERE list_album_id = ? ORDER BY position, id').all(listAlbumId);
+}
+
+function isOrderedSubset(needles, haystack) {
+  let index = 0;
+  for (const item of haystack) {
+    if (item === needles[index]) index += 1;
+    if (index >= needles.length) return true;
+  }
+  return needles.length === 0;
+}
+
+function shouldReplaceTracks(existingTracks, nextTracks) {
+  if (!nextTracks.length) return false;
+  if (!existingTracks.length) return true;
+  if (nextTracks.length === existingTracks.length) {
+    return trackListJapaneseScore(nextTracks) > trackListJapaneseScore(existingTracks);
+  }
+  if (nextTracks.length < existingTracks.length) return false;
+  const existingKeys = existingTracks.map((track, index) => track.track_key || trackKey(track.title, index + 1));
+  const nextKeys = nextTracks.map((track) => track.trackKey);
+  return isOrderedSubset(existingKeys, nextKeys);
+}
+
+function updateExistingAlbumFromInput(existing, albumInput, listId) {
+  return transaction(() => {
+    const artist = clampText(albumInput?.artist, 160);
+    const coverUrl = validateCoverUrl(albumInput?.coverUrl || albumInput?.cover_url);
+    const tracks =
+      Array.isArray(albumInput?.tracks) && albumInput.tracks.every((track) => track?.trackKey)
+        ? albumInput.tracks
+        : sanitizeTracks(albumInput?.tracks);
+    let changed = false;
+
+    if ((!existing.cover_url && coverUrl) || (!existing.artist && artist)) {
+      db.prepare(
+        `UPDATE list_albums
+         SET artist = CASE WHEN artist = '' THEN ? ELSE artist END,
+             cover_url = CASE WHEN cover_url = '' THEN ? ELSE cover_url END,
+             updated_at = ?
+         WHERE id = ?`
+      ).run(artist, coverUrl, nowIso(), existing.id);
+      changed = true;
+    }
+
+    if (shouldReplaceTracks(existingTrackRows(existing.id), tracks)) {
+      replaceAlbumTracks(existing.id, tracks);
+      syncTrackRatingTitles(existing.album_key, tracks);
+      db.prepare('UPDATE list_albums SET updated_at = ? WHERE id = ?').run(nowIso(), existing.id);
+      changed = true;
+    }
+
+    if (changed) {
+      db.prepare('UPDATE lists SET updated_at = ? WHERE id = ?').run(nowIso(), listId);
+    }
+    return changed;
+  })();
+}
+
+function findAlbumInList(listId, title, artist) {
+  const key = albumKey(title, artist);
+  const exact = db.prepare('SELECT * FROM list_albums WHERE list_id = ? AND album_key = ?').get(listId, key);
+  if (exact) return exact;
+
+  const compactKey = compactAlbumIdentity(title, artist);
+  if (!compactKey) return null;
+  return (
+    db
+      .prepare('SELECT * FROM list_albums WHERE list_id = ? ORDER BY sort_order, id')
+      .all(listId)
+      .find((album) => compactAlbumIdentity(album.title, album.artist) === compactKey) || null
+  );
+}
+
+function removeListAlbum(list, user, album) {
+  if (list.kind === 'collab') {
+    const member = getMember(list.id, user.id);
+    if (!member) throw httpError(403, 'Only list members can vote to remove albums.');
+    db.prepare(
+      `INSERT OR IGNORE INTO list_album_removal_votes (list_album_id, user_id, created_at)
+       VALUES (?, ?, ?)`
+    ).run(album.id, user.id, nowIso());
+    const voteCount = db.prepare('SELECT COUNT(*) AS count FROM list_album_removal_votes WHERE list_album_id = ?').get(album.id).count || 0;
+    const threshold = removalThreshold(list.id);
+    if (voteCount >= threshold) {
+      db.prepare('DELETE FROM list_albums WHERE id = ? AND list_id = ?').run(album.id, list.id);
+      db.prepare('UPDATE lists SET updated_at = ? WHERE id = ?').run(nowIso(), list.id);
+      return { removed: true, voteCount, threshold, albumId: album.id };
+    }
+    return { removed: false, voteCount, threshold, albumId: album.id };
+  }
+
+  if (album.created_by !== user.id && list.owner_user_id !== user.id) assertCanEdit(list, user);
+  db.prepare('DELETE FROM list_albums WHERE id = ? AND list_id = ?').run(album.id, list.id);
+  db.prepare('UPDATE lists SET updated_at = ? WHERE id = ?').run(nowIso(), list.id);
+  return { removed: true, voteCount: 1, threshold: 1, albumId: album.id };
+}
+
+function importGuestAlbums(userId, guestImport) {
+  if (!guestImport || !Array.isArray(guestImport.albums)) return { imported: 0, listId: ensurePersonalList(userId) };
+  const listId = ensurePersonalList(userId);
+  const albums = guestImport.albums.slice(0, 200);
+  let imported = 0;
+
+  const tx = transaction(() => {
+    for (const album of albums) {
+      if (!clampText(album?.title, 160)) continue;
+      const albumId = insertAlbum(listId, userId, album);
+      if (album.completed) {
+        db.prepare(
+          `INSERT OR IGNORE INTO album_completions (list_album_id, user_id, completed_at)
+           VALUES (?, ?, ?)`
+        ).run(albumId, userId, nowIso());
+        const savedAlbum = db.prepare('SELECT * FROM list_albums WHERE id = ?').get(albumId);
+        upsertUserAlbumActivity(userId, savedAlbum, { completedAt: nowIso() });
+      }
+      imported += 1;
+    }
+    db.prepare('UPDATE lists SET updated_at = ? WHERE id = ?').run(nowIso(), listId);
+  });
+  tx();
+
+  return { imported, listId };
+}
+
+function albumRatingAggregate(albumKeyValue, trackKeyValue = null) {
+  const whereTrack = trackKeyValue ? 'AND r.track_key = ?' : '';
+  const params = trackKeyValue ? [albumKeyValue, trackKeyValue] : [albumKeyValue];
+  const row = db
+    .prepare(
+      `SELECT AVG(r.rating) AS average_rating, COUNT(*) AS rating_count
+       FROM track_ratings r
+       LEFT JOIN album_average_opt_in opt
+         ON opt.user_id = r.user_id AND opt.album_key = r.album_key
+       WHERE r.album_key = ?
+         ${whereTrack}
+         AND r.include_in_average = 1
+         AND COALESCE(opt.include_in_average, 1) = 1`
+    )
+    .get(...params);
+
+  return {
+    average: row.average_rating === null ? null : Math.round(row.average_rating * 10) / 10,
+    count: row.rating_count || 0
+  };
+}
+
+function userAlbumAverage(userId, albumKeyValue) {
+  const row = db
+    .prepare(
+      `SELECT AVG(rating) AS average_rating, COUNT(*) AS rating_count
+       FROM track_ratings
+       WHERE user_id = ? AND album_key = ? AND include_in_average = 1`
+    )
+    .get(userId, albumKeyValue);
+  return {
+    average: row.average_rating === null ? null : Math.round(row.average_rating * 10) / 10,
+    count: row.rating_count || 0
+  };
+}
+
+function userAlbumFullyListened(userId, albumKeyValue, knownCompletedAt = null) {
+  if (knownCompletedAt) return true;
+
+  const activity = db
+    .prepare('SELECT completed_at FROM user_album_activity WHERE user_id = ? AND album_key = ?')
+    .get(userId, albumKeyValue);
+  if (activity?.completed_at) return true;
+
+  const fullyRatedKnownTrackList = db
+    .prepare(
+      `SELECT 1
+       FROM list_albums la
+       JOIN album_tracks at ON at.list_album_id = la.id
+       LEFT JOIN track_ratings tr
+         ON tr.user_id = ?
+        AND tr.album_key = la.album_key
+        AND tr.track_key = at.track_key
+       WHERE la.album_key = ?
+       GROUP BY la.id
+       HAVING COUNT(at.id) > 0 AND COUNT(DISTINCT tr.track_key) >= COUNT(at.id)
+       LIMIT 1`
+    )
+    .get(userId, albumKeyValue);
+  if (fullyRatedKnownTrackList) return true;
+
+  const knownTrackCount = db
+    .prepare(
+      `SELECT COUNT(*) AS count
+       FROM album_tracks at
+       JOIN list_albums la ON la.id = at.list_album_id
+       WHERE la.album_key = ?`
+    )
+    .get(albumKeyValue).count;
+  if (knownTrackCount > 0) return false;
+
+  return Boolean(
+    db
+      .prepare(
+        `SELECT 1
+         FROM track_ratings
+         WHERE user_id = ? AND album_key = ? AND track_key = ?
+         LIMIT 1`
+      )
+      .get(userId, albumKeyValue, albumLevelTrackKey)
+  );
+}
+
+function upsertUserAlbumActivity(userId, album, values = {}) {
+  const completedAt = values.completedAt === undefined ? null : values.completedAt;
+  const ratedAt = values.ratedAt === undefined ? null : values.ratedAt;
+  db.prepare(
+    `INSERT INTO user_album_activity
+     (user_id, album_key, title, artist, cover_url, completed_at, rated_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(user_id, album_key) DO UPDATE SET
+       title = excluded.title,
+       artist = excluded.artist,
+       cover_url = excluded.cover_url,
+       completed_at = COALESCE(excluded.completed_at, user_album_activity.completed_at),
+       rated_at = COALESCE(excluded.rated_at, user_album_activity.rated_at),
+       updated_at = excluded.updated_at`
+  ).run(
+    userId,
+    album.album_key,
+    album.title,
+    album.artist || '',
+    safeExternalImageUrl(album.cover_url),
+    completedAt,
+    ratedAt,
+    nowIso()
+  );
+}
+
+function listAlbumCompletions(listId, listAlbumId, albumKeyValue) {
+  const rows = db
+    .prepare(
+      `SELECT ac.completed_at, u.id AS user_id, u.username, u.avatar_color, u.avatar_data_url
+       FROM album_completions ac
+       JOIN users u ON u.id = ac.user_id
+       WHERE ac.list_album_id = ?
+       UNION ALL
+       SELECT activity.completed_at, u.id AS user_id, u.username, u.avatar_color, u.avatar_data_url
+       FROM user_album_activity activity
+       JOIN list_members lm ON lm.list_id = ? AND lm.user_id = activity.user_id
+       JOIN users u ON u.id = activity.user_id
+       WHERE activity.album_key = ? AND activity.completed_at IS NOT NULL`
+    )
+    .all(listAlbumId, listId, albumKeyValue);
+
+  const byUserId = new Map();
+  for (const row of rows) {
+    const existing = byUserId.get(row.user_id);
+    if (!existing || String(row.completed_at) > String(existing.completedAt)) {
+      byUserId.set(row.user_id, {
+        userId: row.user_id,
+        username: row.username,
+        avatarColor: row.avatar_color,
+        avatarUrl: safeAvatarDataUrl(row.avatar_data_url),
+        completedAt: row.completed_at
+      });
+    }
+  }
+
+  return [...byUserId.values()].sort((a, b) => String(b.completedAt).localeCompare(String(a.completedAt)));
+}
+
+function maybeAutoCompleteAlbum(list, album, userId) {
+  const trackCount = db.prepare('SELECT COUNT(*) AS count FROM album_tracks WHERE list_album_id = ?').get(album.id).count;
+  if (!trackCount) return false;
+  const ratedCount = db
+    .prepare(
+      `SELECT COUNT(DISTINCT at.track_key) AS count
+       FROM album_tracks at
+       JOIN track_ratings tr
+         ON tr.album_key = ? AND tr.track_key = at.track_key AND tr.user_id = ?
+       WHERE at.list_album_id = ?`
+    )
+    .get(album.album_key, userId, album.id).count;
+  if (ratedCount < trackCount) return false;
+
+  db.prepare(
+    `INSERT INTO album_completions (list_album_id, user_id, completed_at)
+     VALUES (?, ?, ?)
+     ON CONFLICT(list_album_id, user_id) DO UPDATE SET completed_at = COALESCE(album_completions.completed_at, excluded.completed_at)`
+  ).run(album.id, userId, nowIso());
+  upsertUserAlbumActivity(userId, album, { completedAt: nowIso(), ratedAt: nowIso() });
+  return true;
+}
+
+function removalThreshold(listId) {
+  const memberCount = db.prepare('SELECT COUNT(*) AS count FROM list_members WHERE list_id = ?').get(listId).count || 1;
+  return Math.max(1, Math.ceil(memberCount / 4));
+}
+
+function listChatMessages(listId) {
+  return db
+    .prepare(
+      `SELECT lm.id, lm.body, lm.created_at, u.id AS user_id, u.username, u.avatar_color, u.avatar_data_url
+       FROM list_messages lm
+       JOIN users u ON u.id = lm.user_id
+       WHERE lm.list_id = ?
+       ORDER BY lm.created_at DESC
+       LIMIT 100`
+    )
+    .all(listId)
+    .reverse()
+    .map((message) => ({
+      id: message.id,
+      body: message.body,
+      createdAt: message.created_at,
+      userId: message.user_id,
+      username: message.username,
+      avatarColor: message.avatar_color,
+      avatarUrl: safeAvatarDataUrl(message.avatar_data_url)
+    }));
+}
+
+function listRevision(listId) {
+  const row = db
+    .prepare(
+      `SELECT
+         l.updated_at AS list_updated_at,
+         (SELECT MAX(updated_at) FROM list_albums WHERE list_id = l.id) AS albums_updated_at,
+         (SELECT MAX(r.updated_at)
+          FROM track_ratings r
+          JOIN list_albums la ON la.album_key = r.album_key
+          WHERE la.list_id = l.id) AS ratings_updated_at,
+         (SELECT MAX(opt.updated_at)
+          FROM album_average_opt_in opt
+          JOIN list_albums la ON la.album_key = opt.album_key
+          WHERE la.list_id = l.id) AS rating_prefs_updated_at,
+         (SELECT MAX(completed_at)
+          FROM album_completions ac
+          JOIN list_albums la ON la.id = ac.list_album_id
+          WHERE la.list_id = l.id) AS completions_updated_at,
+         (SELECT MAX(activity.updated_at)
+          FROM user_album_activity activity
+          JOIN list_albums la ON la.album_key = activity.album_key
+          WHERE la.list_id = l.id) AS activity_updated_at,
+         (SELECT MAX(votes.created_at)
+          FROM list_album_removal_votes votes
+          JOIN list_albums la ON la.id = votes.list_album_id
+          WHERE la.list_id = l.id) AS votes_updated_at,
+         (SELECT MAX(created_at) FROM list_messages WHERE list_id = l.id) AS messages_updated_at,
+         (SELECT MAX(joined_at) FROM list_members WHERE list_id = l.id) AS members_updated_at,
+         (SELECT COUNT(*) FROM list_members WHERE list_id = l.id) AS member_count,
+         (SELECT COUNT(*) FROM list_albums WHERE list_id = l.id) AS album_count
+       FROM lists l
+       WHERE l.id = ?`
+    )
+    .get(listId);
+  if (!row) return '';
+  return [
+    row.list_updated_at,
+    row.albums_updated_at,
+    row.ratings_updated_at,
+    row.rating_prefs_updated_at,
+    row.completions_updated_at,
+    row.activity_updated_at,
+    row.votes_updated_at,
+    row.messages_updated_at,
+    row.members_updated_at,
+    row.member_count,
+    row.album_count
+  ]
+    .map((value) => value ?? '')
+    .join('|');
+}
+
+function buildListAccess(list, user, allowShare = false) {
+  const member = assertCanView(list, user, allowShare);
+  const members = listMembers(list.id);
+  return {
+    allowShare,
+    member,
+    members,
+    canEdit: Boolean(member && ['owner', 'editor'].includes(member.role)),
+    canManage: Boolean(member && member.role === 'owner'),
+    canRate: Boolean(member && user),
+    isMember: Boolean(member)
+  };
+}
+
+function buildListSummaryPayload(list, access, albumCount) {
+  const resolvedAlbumCount =
+    albumCount ??
+    (db.prepare('SELECT COUNT(*) AS count FROM list_albums WHERE list_id = ?').get(list.id).count || 0);
+  return formatListSummary(
+    {
+      ...list,
+      role: access.member?.role || null,
+      owner_username: db.prepare('SELECT username FROM users WHERE id = ?').get(list.owner_user_id)?.username,
+      album_count: resolvedAlbumCount,
+      member_count: access.members.length
+    },
+    {
+      includeShareToken: access.canManage || access.allowShare,
+      includeInviteToken: access.canManage
+    }
+  );
+}
+
+function buildListAlbumPayload(list, user, album, access) {
+  const personalAlbum =
+    user && list.kind !== 'personal'
+      ? db
+          .prepare(
+            `SELECT la.id, la.list_id
+             FROM list_albums la
+             JOIN lists l ON l.id = la.list_id
+             WHERE l.owner_user_id = ? AND l.kind = 'personal' AND la.album_key = ?
+             LIMIT 1`
+          )
+          .get(user.id, album.album_key)
+      : null;
+  const personalAverage = user ? userAlbumAverage(user.id, album.album_key) : null;
+  const tracks = db
+    .prepare('SELECT * FROM album_tracks WHERE list_album_id = ? ORDER BY position, id')
+    .all(album.id)
+    .map((track) => {
+      const userRating = user
+        ? db
+            .prepare(
+              `SELECT rating, include_in_average, updated_at
+               FROM track_ratings
+               WHERE user_id = ? AND album_key = ? AND track_key = ?`
+            )
+            .get(user.id, album.album_key, track.track_key)
+        : null;
+
+      return {
+        id: track.id,
+        title: track.title,
+        position: track.position,
+        trackKey: track.track_key,
+        userRating: userRating
+          ? {
+              rating: userRating.rating,
+              includeInAverage: Boolean(userRating.include_in_average),
+              updatedAt: userRating.updated_at
+            }
+          : null,
+        aggregate: list.show_ratings ? albumRatingAggregate(album.album_key, track.track_key) : null
+      };
+    });
+
+  const completions = listAlbumCompletions(list.id, album.id, album.album_key);
+  const completedIds = new Set(completions.map((completion) => completion.userId));
+  const pendingMembers = access.members.filter((listMember) => !completedIds.has(listMember.userId));
+  const removalVoteCount = db.prepare('SELECT COUNT(*) AS count FROM list_album_removal_votes WHERE list_album_id = ?').get(album.id).count || 0;
+  const removalVoteThreshold = list.kind === 'collab' ? removalThreshold(list.id) : 1;
+  const currentUserRemovalVoted = user
+    ? Boolean(
+        db
+          .prepare('SELECT 1 FROM list_album_removal_votes WHERE list_album_id = ? AND user_id = ?')
+          .get(album.id, user.id)
+      )
+    : false;
+  const optInRow = user
+    ? db
+        .prepare('SELECT include_in_average FROM album_average_opt_in WHERE user_id = ? AND album_key = ?')
+        .get(user.id, album.album_key)
+    : null;
+  const albumLevelRating = user
+    ? db
+        .prepare(
+          `SELECT rating, include_in_average, updated_at
+           FROM track_ratings
+           WHERE user_id = ? AND album_key = ? AND track_key = ?`
+        )
+        .get(user.id, album.album_key, albumLevelTrackKey)
+    : null;
+
+  const ratingsByUser =
+    list.show_ratings && access.isMember
+      ? db
+          .prepare(
+            `SELECT r.user_id, u.username, u.avatar_color, u.avatar_data_url, r.track_key, r.track_title, r.rating, r.include_in_average, r.updated_at
+             FROM track_ratings r
+             JOIN list_members rating_member ON rating_member.list_id = ? AND rating_member.user_id = r.user_id
+             JOIN users u ON u.id = r.user_id
+             WHERE r.album_key = ?
+             ORDER BY u.username COLLATE NOCASE, r.track_title COLLATE NOCASE`
+          )
+          .all(list.id, album.album_key)
+          .map((rating) => ({
+            userId: rating.user_id,
+            username: rating.username,
+            avatarColor: rating.avatar_color,
+            avatarUrl: safeAvatarDataUrl(rating.avatar_data_url),
+            trackKey: rating.track_key,
+            trackTitle: rating.track_title,
+            rating: rating.rating,
+            includeInAverage: Boolean(rating.include_in_average),
+            updatedAt: rating.updated_at
+          }))
+      : [];
+
+  return {
+    id: album.id,
+    albumKey: album.album_key,
+    title: album.title,
+    artist: album.artist,
+    coverUrl: safeExternalImageUrl(album.cover_url),
+    externalUrl: albumExternalUrl(album, user?.musicPlatform || 'na'),
+    notes: album.notes,
+    sortOrder: album.sort_order,
+    createdBy: album.created_by,
+    creatorUsername: album.creator_username,
+    createdAt: album.created_at,
+    updatedAt: album.updated_at,
+    tracks,
+    completions,
+    pendingMembers,
+    currentUserCompleted: Boolean(user && completedIds.has(user.id)),
+    currentUserAverageOptIn: optInRow ? Boolean(optInRow.include_in_average) : true,
+    currentUserAlbumRating: albumLevelRating
+      ? {
+          rating: albumLevelRating.rating,
+          includeInAverage: Boolean(albumLevelRating.include_in_average),
+          updatedAt: albumLevelRating.updated_at
+        }
+      : null,
+    currentUserRemovalVoted,
+    removalVoteCount,
+    removalVoteThreshold,
+    currentUserLibrary: personalAlbum
+      ? {
+          listId: personalAlbum.list_id,
+          albumId: personalAlbum.id,
+          average: personalAverage.average,
+          ratingCount: personalAverage.count
+        }
+      : null,
+    aggregate: list.show_ratings ? albumRatingAggregate(album.album_key) : null,
+    ratingsByUser
+  };
+}
+
+function buildListMutationResponse(list, user, options = {}) {
+  const access = buildListAccess(list, user, options.allowShare);
+  const response = { ok: true, revision: listRevision(list.id) };
+
+  if (options.includeListSummary) {
+    response.list = buildListSummaryPayload(list, access, options.albumCount);
+  }
+
+  if (options.albumId !== undefined && options.albumId !== null) {
+    const album = db
+      .prepare(
+        `SELECT la.*, creator.username AS creator_username
+         FROM list_albums la
+         LEFT JOIN users creator ON creator.id = la.created_by
+         WHERE la.id = ? AND la.list_id = ?`
+      )
+      .get(Number(options.albumId), list.id);
+    if (album) response.album = buildListAlbumPayload(list, user, album, access);
+  }
+
+  if (options.removedAlbumId !== undefined && options.removedAlbumId !== null) {
+    response.removedAlbumId = Number(options.removedAlbumId);
+  }
+
+  if (options.includeMessages && list.kind === 'collab' && access.member) {
+    response.messages = listChatMessages(list.id);
+  }
+
+  return response;
+}
+
+function buildListPayload(list, user, allowShare = false) {
+  const access = buildListAccess(list, user, allowShare);
+
+  const albumRows = db
+    .prepare(
+      `SELECT la.*, creator.username AS creator_username
+       FROM list_albums la
+       LEFT JOIN users creator ON creator.id = la.created_by
+       WHERE la.list_id = ?
+       ORDER BY la.sort_order, la.created_at`
+    )
+    .all(list.id);
+
+  const albums = albumRows.map((album) => buildListAlbumPayload(list, user, album, access));
+
+  return {
+    revision: listRevision(list.id),
+    list: buildListSummaryPayload(list, access, albums.length),
+    permissions: { canEdit: access.canEdit, canManage: access.canManage, canRate: access.canRate, isMember: access.isMember },
+    members: access.members,
+    albums,
+    messages: list.kind === 'collab' && access.member ? listChatMessages(list.id) : []
+  };
+}
+
+function sendListPayload(req, res, list, user, allowShare = false) {
+  const revision = listRevision(list.id);
+  if (req.query?.revision && String(req.query.revision) === revision) {
+    res.json({ notModified: true, revision });
+    return;
+  }
+  res.json(buildListPayload(list, user, allowShare));
+}
+
+function buildUserProfile(username, viewer) {
+  const normalized = normalizeText(username);
+  const profileUser = db.prepare('SELECT * FROM users WHERE username_normalized = ?').get(normalized);
+  if (!profileUser) throw httpError(404, 'User not found.');
+
+  const lists = db
+    .prepare(
+      `SELECT l.*,
+        'owner' AS role,
+        owner.username AS owner_username,
+        COUNT(DISTINCT la.id) AS album_count,
+        COUNT(DISTINCT members.user_id) AS member_count
+       FROM lists l
+       JOIN users owner ON owner.id = l.owner_user_id
+       LEFT JOIN list_albums la ON la.list_id = l.id
+       LEFT JOIN list_members members ON members.list_id = l.id
+       WHERE l.owner_user_id = ?
+         AND (l.visibility = 'public' OR ? = l.owner_user_id)
+       GROUP BY l.id
+       ORDER BY l.updated_at DESC`
+    )
+    .all(profileUser.id, viewer?.id || 0)
+    .map(formatListSummary);
+
+  const commonAlbumKeys = viewer
+    ? new Set(
+        db
+          .prepare(
+            `SELECT album_key FROM user_album_activity WHERE user_id = ?
+             UNION
+             SELECT album_key FROM track_ratings WHERE user_id = ?
+             UNION
+             SELECT la.album_key
+             FROM list_albums la
+             JOIN list_members lm ON lm.list_id = la.list_id
+             WHERE lm.user_id = ?`
+          )
+          .all(viewer.id, viewer.id, viewer.id)
+          .map((row) => row.album_key)
+      )
+    : new Set();
+
+  const ratedAlbums = db
+    .prepare(
+      `WITH rated_keys AS (
+         SELECT DISTINCT album_key FROM track_ratings WHERE user_id = ?
+         UNION
+         SELECT album_key
+         FROM user_album_activity
+         WHERE user_id = ?
+           AND (rated_at IS NOT NULL OR completed_at IS NOT NULL)
+       )
+       SELECT
+         rated_keys.album_key,
+         COALESCE(NULLIF(activity.title, ''), MAX(la.title), rated_keys.album_key) AS title,
+         COALESCE(NULLIF(activity.artist, ''), MAX(la.artist), '') AS artist,
+         COALESCE(NULLIF(activity.cover_url, ''), MAX(la.cover_url), '') AS cover_url,
+         activity.completed_at,
+         activity.rated_at
+       FROM rated_keys
+       LEFT JOIN user_album_activity activity
+         ON activity.user_id = ? AND activity.album_key = rated_keys.album_key
+       LEFT JOIN list_albums la ON la.album_key = rated_keys.album_key
+       GROUP BY rated_keys.album_key
+       LIMIT 200`
+    )
+    .all(profileUser.id, profileUser.id, profileUser.id)
+    .map((album) => {
+      const average = userAlbumAverage(profileUser.id, album.album_key);
+      const fullyListened = userAlbumFullyListened(profileUser.id, album.album_key, album.completed_at);
+      const ratings = db
+        .prepare(
+          `SELECT track_key, track_title, rating, include_in_average, updated_at
+           FROM track_ratings
+           WHERE user_id = ? AND album_key = ?
+           ORDER BY track_key = ? DESC, track_title COLLATE NOCASE`
+        )
+        .all(profileUser.id, album.album_key, albumLevelTrackKey)
+        .map((rating) => ({
+          trackKey: rating.track_key,
+          trackTitle: rating.track_title,
+          rating: rating.rating,
+          includeInAverage: Boolean(rating.include_in_average),
+          updatedAt: rating.updated_at
+        }));
+      return {
+        albumKey: album.album_key,
+        title: album.title,
+        artist: album.artist,
+        coverUrl: safeExternalImageUrl(album.cover_url),
+        completedAt: album.completed_at,
+        ratedAt: album.rated_at,
+        fullyListened,
+        average: average.average,
+        ratingCount: average.count,
+        ratings,
+        inCommon: commonAlbumKeys.has(album.album_key)
+      };
+    })
+    .sort((a, b) => {
+      if (a.fullyListened !== b.fullyListened) return a.fullyListened ? -1 : 1;
+      if (a.inCommon !== b.inCommon) return a.inCommon ? -1 : 1;
+      return (b.average ?? -1) - (a.average ?? -1);
+    });
+
+  return {
+    user: publicUser(profileUser, { includePrivate: viewer?.id === profileUser.id }),
+    lists,
+    ratedAlbums
+  };
+}
+
+function exploreListBySlug(slug) {
+  return exploreLists.find((item) => item.slug === slug);
+}
+
+function exploreListWithCachedCovers(list) {
+  const cached = new Map(
+    db
+      .prepare('SELECT album_index, cover_url FROM explore_album_covers WHERE slug = ?')
+      .all(list.slug)
+      .map((row) => [row.album_index, safeExternalImageUrl(row.cover_url)])
+  );
+  return {
+    ...list,
+    albums: list.albums.map((album, index) => ({
+      ...album,
+      coverUrl: safeExternalImageUrl(album.coverUrl) || safeExternalImageUrl(cached.get(index)) || ''
+    }))
+  };
+}
+
+function cachedExploreCover(slug, albumIndex) {
+  const memoryKey = `${slug}:${albumIndex}`;
+  if (exploreCoverMemoryCache.has(memoryKey)) return exploreCoverMemoryCache.get(memoryKey);
+  const row = db
+    .prepare('SELECT cover_url FROM explore_album_covers WHERE slug = ? AND album_index = ?')
+    .get(slug, albumIndex);
+  if (!row) return null;
+  if (!row.cover_url) return null;
+  const coverUrl = safeExternalImageUrl(row.cover_url);
+  if (!coverUrl) return null;
+  exploreCoverMemoryCache.set(memoryKey, coverUrl);
+  return coverUrl;
+}
+
+function saveExploreCover(slug, albumIndex, album, coverUrl) {
+  const safeCoverUrl = safeExternalImageUrl(coverUrl);
+  if (!safeCoverUrl) return;
+  const memoryKey = `${slug}:${albumIndex}`;
+  exploreCoverMemoryCache.set(memoryKey, safeCoverUrl);
+  db.prepare(
+    `INSERT INTO explore_album_covers (slug, album_index, title, artist, cover_url, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?)
+     ON CONFLICT(slug, album_index) DO UPDATE SET
+       title = excluded.title,
+       artist = excluded.artist,
+       cover_url = excluded.cover_url,
+     updated_at = excluded.updated_at`
+  ).run(slug, albumIndex, album.title || '', album.artist || '', safeCoverUrl, nowIso());
+}
+
+function clearExploreCover(slug, albumIndex) {
+  exploreCoverMemoryCache.delete(`${slug}:${albumIndex}`);
+  db.prepare('DELETE FROM explore_album_covers WHERE slug = ? AND album_index = ?').run(slug, albumIndex);
+}
+
+async function firstWorkingCover(candidates) {
+  for (const candidate of uniqueBy(candidates.map(safeExternalImageUrl).filter(Boolean), (coverUrl) => coverUrl)) {
+    if (await imageUrlWorks(candidate)) return candidate;
+  }
+  return '';
+}
+
+async function resolveExploreCover(slug, albumIndex, album, options = {}) {
+  const force = Boolean(options.force);
+  const providedCoverUrl = safeExternalImageUrl(album.coverUrl);
+  if (!force && providedCoverUrl) {
+    saveExploreCover(slug, albumIndex, album, providedCoverUrl);
+    return providedCoverUrl;
+  }
+  const cached = force ? null : cachedExploreCover(slug, albumIndex);
+  if (cached !== null) return cached;
+  const candidates = [];
+  const spotifyCover = await spotifyAlbumCover(album.spotifyId);
+  if (spotifyCover) candidates.push(spotifyCover);
+  const results = await searchAlbums(`${album.title} ${album.artist}`, 'US').catch(() => []);
+  const exact = results.find(
+    (item) => normalizeText(item.title).includes(normalizeText(album.title)) && normalizeText(item.artist).includes(normalizeText(album.artist))
+  );
+  if (exact?.coverUrl) candidates.push(exact.coverUrl);
+  candidates.push(...results.map((result) => result.coverUrl));
+  if (force && providedCoverUrl) candidates.push(providedCoverUrl);
+  const coverUrl = await firstWorkingCover(candidates);
+  saveExploreCover(slug, albumIndex, album, coverUrl);
+  if (!coverUrl && force) clearExploreCover(slug, albumIndex);
+  return coverUrl;
+}
+
+function popularSharedLists(limit = 8) {
+  return db
+    .prepare(
+      `SELECT l.*,
+        lm.role,
+        owner.username AS owner_username,
+        COUNT(DISTINCT la.id) AS album_count,
+        COUNT(DISTINCT members.user_id) AS member_count,
+        COUNT(DISTINCT ac.user_id || ':' || ac.list_album_id) AS listen_count
+       FROM lists l
+       JOIN users owner ON owner.id = l.owner_user_id
+       JOIN list_members lm ON lm.list_id = l.id AND lm.user_id = l.owner_user_id
+       LEFT JOIN list_albums la ON la.list_id = l.id
+       LEFT JOIN list_members members ON members.list_id = l.id
+       LEFT JOIN album_completions ac ON ac.list_album_id = la.id
+       WHERE l.visibility = 'public'
+       GROUP BY l.id
+       ORDER BY member_count DESC, listen_count DESC, album_count DESC, l.updated_at DESC
+       LIMIT ?`
+    )
+    .all(limit)
+    .map((row) => ({
+      ...formatListSummary(row),
+      listenCount: row.listen_count || 0
+    }));
+}
+
+function albumMetadata(albumKeyValue) {
+  const activity = db
+    .prepare(
+      `SELECT title, artist, cover_url
+       FROM user_album_activity
+       WHERE album_key = ? AND (title != '' OR artist != '' OR cover_url != '')
+       ORDER BY updated_at DESC
+       LIMIT 1`
+    )
+    .get(albumKeyValue);
+  if (activity) return activity;
+  return (
+    db
+      .prepare(
+        `SELECT title, artist, cover_url
+         FROM list_albums
+         WHERE album_key = ?
+         ORDER BY updated_at DESC
+         LIMIT 1`
+      )
+      .get(albumKeyValue) || { title: albumKeyValue, artist: '', cover_url: '' }
+  );
+}
+
+function userKnownAlbumKeys(userId) {
+  return new Set(
+    db
+      .prepare(
+        `SELECT album_key FROM user_album_activity WHERE user_id = ?
+         UNION
+         SELECT album_key FROM track_ratings WHERE user_id = ?
+         UNION
+         SELECT la.album_key
+         FROM list_albums la
+         JOIN list_members lm ON lm.list_id = la.list_id
+         WHERE lm.user_id = ?`
+      )
+      .all(userId, userId, userId)
+      .map((row) => row.album_key)
+  );
+}
+
+function buildRecommendations(user, limit = 12) {
+  const knownKeys = userKnownAlbumKeys(user.id);
+  const highKeys = db
+    .prepare(
+      `SELECT album_key, AVG(rating) AS average_rating
+       FROM track_ratings
+       WHERE user_id = ?
+       GROUP BY album_key
+       HAVING average_rating >= 7`
+    )
+    .all(user.id)
+    .map((row) => row.album_key);
+
+  const highKeySet = new Set(highKeys);
+  const similarUserIds =
+    highKeys.length > 0
+      ? db
+          .prepare(
+            `SELECT DISTINCT user_id
+             FROM track_ratings
+             WHERE user_id != ?
+               AND rating >= 7
+               AND album_key IN (${highKeys.map(() => '?').join(',')})`
+          )
+          .all(user.id, ...highKeys)
+          .map((row) => row.user_id)
+      : [];
+
+  const candidateRows =
+    similarUserIds.length > 0
+      ? db
+          .prepare(
+            `SELECT album_key, AVG(rating) AS average_rating, COUNT(DISTINCT user_id) AS listener_count
+             FROM track_ratings
+             WHERE user_id IN (${similarUserIds.map(() => '?').join(',')})
+             GROUP BY album_key
+             HAVING average_rating >= 7
+             ORDER BY listener_count DESC, average_rating DESC
+             LIMIT 100`
+          )
+          .all(...similarUserIds)
+      : db
+          .prepare(
+            `SELECT album_key, AVG(rating) AS average_rating, COUNT(DISTINCT user_id) AS listener_count
+             FROM track_ratings
+             WHERE user_id != ?
+             GROUP BY album_key
+             HAVING average_rating >= 7
+             ORDER BY listener_count DESC, average_rating DESC
+             LIMIT 100`
+          )
+          .all(user.id);
+
+  const recommendations = [];
+  for (const row of candidateRows) {
+    if (knownKeys.has(row.album_key) || highKeySet.has(row.album_key)) continue;
+    const metadata = albumMetadata(row.album_key);
+    recommendations.push({
+      albumKey: row.album_key,
+      title: metadata.title,
+      artist: metadata.artist || '',
+      coverUrl: safeExternalImageUrl(metadata.cover_url),
+      score: Math.round(Number(row.average_rating || 0) * 10) / 10,
+      listenerCount: row.listener_count || 0,
+      reason: similarUserIds.length > 0 ? 'People with similar ratings liked this.' : 'Popular with other listeners.'
+    });
+    if (recommendations.length >= limit) break;
+  }
+
+  if (recommendations.length >= Math.min(4, limit)) return recommendations;
+
+  for (const list of exploreLists.slice(0, 3)) {
+    for (const album of list.albums) {
+      const key = albumKey(album.title, album.artist);
+      if (knownKeys.has(key) || recommendations.some((item) => item.albumKey === key)) continue;
+      recommendations.push({
+        albumKey: key,
+        title: album.title,
+        artist: album.artist,
+        coverUrl: safeExternalImageUrl(album.coverUrl),
+        score: null,
+        listenerCount: 0,
+        reason: `From ${list.name}.`
+      });
+      if (recommendations.length >= limit) return recommendations;
+    }
+  }
+
+  return recommendations;
+}
+
+app.get(
+  '/api/health',
+  route((req, res) => {
+    db.prepare('SELECT 1').get();
+    res.json({ ok: true, time: nowIso(), uptimeSeconds: Math.round(process.uptime()), database: 'ok' });
+  })
+);
+
+app.get('/api/explore', (req, res) => {
+  cachePublic(res, 60, 300);
+  res.json({
+    lists: exploreLists.map(({ albums, ...list }) => list),
+    popularLists: popularSharedLists()
+  });
+});
+
+app.get(
+  '/api/explore/:slug',
+  route((req, res) => {
+    const list = exploreListBySlug(req.params.slug);
+    if (!list) throw httpError(404, 'Explore list not found.');
+    cachePublic(res, 120, 600);
+    res.json({ list: exploreListWithCachedCovers(list) });
+  })
+);
+
+app.get(
+  '/api/explore/:slug/covers',
+  route(async (req, res) => {
+    limitExploreCoverLookup(req);
+    const list = exploreListBySlug(req.params.slug);
+    if (!list) throw httpError(404, 'Explore list not found.');
+    const offset = Math.max(0, Number(req.query.offset || 0) || 0);
+    const limit = Math.min(12, Math.max(1, Number(req.query.limit || 12) || 12));
+    const slice = list.albums.slice(offset, offset + limit);
+    const covers = await Promise.all(slice.map(async (album, index) => ({
+      index: offset + index,
+      coverUrl: await resolveExploreCover(list.slug, offset + index, album)
+    })));
+    cachePublic(res, 300, 900);
+    res.json({ covers });
+  })
+);
+
+app.post(
+  '/api/explore/:slug/covers/warm',
+  route(async (req, res) => {
+    limitExploreCoverLookup(req);
+    const list = exploreListBySlug(req.params.slug);
+    if (!list) throw httpError(404, 'Explore list not found.');
+    const offset = Math.max(0, Number(req.body?.offset || 0) || 0);
+    const limit = Math.min(12, Math.max(1, Number(req.body?.limit || 12) || 12));
+    const slice = list.albums.slice(offset, offset + limit);
+    const covers = await Promise.all(
+      slice.map(async (album, index) => ({
+        index: offset + index,
+        coverUrl: await resolveExploreCover(list.slug, offset + index, album)
+      }))
+    );
+    res.json({ covers, nextOffset: offset + slice.length, total: list.albums.length });
+  })
+);
+
+app.post(
+  '/api/explore/:slug/covers/:index/refresh',
+  route(async (req, res) => {
+    limitExploreCoverLookup(req);
+    const list = exploreListBySlug(req.params.slug);
+    if (!list) throw httpError(404, 'Explore list not found.');
+    const index = Number(req.params.index);
+    if (!Number.isInteger(index) || index < 0 || index >= list.albums.length) {
+      throw httpError(404, 'Explore album not found.');
+    }
+    const coverUrl = await resolveExploreCover(list.slug, index, list.albums[index], { force: true });
+    res.json({ index, coverUrl });
+  })
+);
+
+app.get(
+  '/api/recommendations',
+  route((req, res) => {
+    const user = requireUser(req);
+    res.json({ recommendations: buildRecommendations(user) });
+  })
+);
+
+app.get(
+  '/api/albums/search',
+  route(async (req, res) => {
+    limitAlbumSearch(req);
+    const results = await searchAlbums(req.query.q, itunesCountry(req));
+    cachePublic(res, 300, 600);
+    res.json({ results });
+  })
+);
+
+app.get(
+  '/api/albums/lookup/:providerId',
+  route(async (req, res) => {
+    limitAlbumLookup(req);
+    const album = await lookupAlbum(req.params.providerId, itunesCountry(req));
+    cachePublic(res, 600, 1800);
+    res.json({ album });
+  })
+);
+
+app.get(
+  '/api/me',
+  route((req, res) => {
+    if (!req.user) {
+      res.json({ user: null, lists: [], invites: [] });
+      return;
+    }
+    ensurePersonalList(req.user.id);
+    res.json({ user: req.user, lists: getUserLists(req.user.id), invites: getPendingInvites(req.user.id) });
+  })
+);
+
+app.get(
+  '/api/me/album-lists',
+  route((req, res) => {
+    const user = requireUser(req);
+    const title = clampText(req.query.title, 160);
+    if (!title) throw httpError(400, 'Album title is required.');
+    const artist = clampText(req.query.artist, 160);
+    const key = albumKey(title, artist);
+    const items = db
+      .prepare(
+        `SELECT l.id AS list_id, l.name, l.kind, lm.role, la.id AS album_id
+         FROM list_members lm
+         JOIN lists l ON l.id = lm.list_id
+         LEFT JOIN list_albums la ON la.list_id = l.id AND la.album_key = ?
+         WHERE lm.user_id = ? AND lm.role IN ('owner', 'editor')
+         ORDER BY l.kind = 'personal' DESC, l.updated_at DESC`
+      )
+      .all(key, user.id)
+      .map((item) => ({
+        listId: item.list_id,
+        name: item.name,
+        kind: item.kind,
+        role: item.role,
+        albumId: item.album_id || null
+      }));
+    res.json({ items });
+  })
+);
+
+app.post(
+  '/api/auth/register',
+  route((req, res) => {
+    checkAuthThrottle(req);
+    const { username, email, password, musicPlatform } = validateAccountInput(req.body || {});
+    const passwordHash = bcrypt.hashSync(password, 12);
+    const normalizedUsername = normalizeText(username);
+    const normalizedEmail = normalizeEmail(email);
+
+    const exists = db
+      .prepare('SELECT 1 FROM users WHERE username_normalized = ? OR email_normalized = ?')
+      .get(normalizedUsername, normalizedEmail);
+    if (exists) throw httpError(409, 'That username or email is unavailable.');
+
+    const tx = transaction(() => {
+      const info = db
+        .prepare(
+          `INSERT INTO users
+           (username, username_normalized, email, email_normalized, password_hash, avatar_color, music_platform, history_token, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        )
+        .run(username, normalizedUsername, email, normalizedEmail, passwordHash, avatarFor(username), musicPlatform, uniqueTokenFor('users', 'history_token'), nowIso());
+      const userId = Number(info.lastInsertRowid);
+      ensurePersonalList(userId);
+      const imported = importGuestAlbums(userId, req.body?.guestImport);
+      return { userId, imported };
+    });
+
+    const { userId, imported } = tx();
+    replaceCurrentSession(req, res, userId);
+    const user = publicUser(db.prepare('SELECT * FROM users WHERE id = ?').get(userId), { includePrivate: true });
+    res.status(201).json({ user, lists: getUserLists(userId), imported });
+  })
+);
+
+app.post(
+  '/api/auth/login',
+  route((req, res) => {
+    checkAuthThrottle(req);
+    const identifier = String(req.body?.identifier || '').trim();
+    const password = String(req.body?.password || '');
+    if (!identifier || !password) throw httpError(400, 'Username/email and password are required.');
+
+    const normalized = identifier.includes('@') ? normalizeEmail(identifier) : normalizeText(identifier);
+    const userRow = db
+      .prepare(
+        `SELECT * FROM users
+         WHERE username_normalized = ? OR email_normalized = ?`
+      )
+      .get(normalized, normalized);
+    if (!userRow || !bcrypt.compareSync(password, userRow.password_hash)) {
+      throw httpError(401, 'Invalid username/email or password.');
+    }
+    if (userRow.disabled_at) {
+      throw httpError(403, 'This account is disabled.');
+    }
+
+    const imported = importGuestAlbums(userRow.id, req.body?.guestImport);
+    replaceCurrentSession(req, res, userRow.id);
+    res.json({ user: publicUser(userRow, { includePrivate: true }), lists: getUserLists(userRow.id), imported });
+  })
+);
+
+app.post(
+  '/api/auth/logout',
+  route((req, res) => {
+    deleteCurrentSession(req);
+    clearSessionCookie(res);
+    res.json({ ok: true });
+  })
+);
+
+app.patch(
+  '/api/me',
+  route((req, res) => {
+    const user = requireUser(req);
+    enforceRateLimit(req, 'profile-update', {
+      limit: 120,
+      windowMs: 60 * 60 * 1000,
+      message: 'Profile updates are temporarily rate limited. Try again later.'
+    });
+    const updates = {};
+    if (['private', 'unlisted'].includes(req.body?.historyVisibility)) {
+      updates.history_visibility = req.body.historyVisibility;
+    }
+    if (['system', 'light', 'dark', 'retro'].includes(req.body?.themePreference)) {
+      updates.theme_preference = req.body.themePreference;
+    }
+    if (Object.hasOwn(req.body || {}, 'avatarDataUrl')) {
+      limitAvatarUpload(req);
+      updates.avatar_data_url = validateAvatarDataUrl(req.body.avatarDataUrl);
+    }
+    if (Object.hasOwn(req.body || {}, 'musicPlatform')) {
+      updates.music_platform = normalizeMusicPlatform(req.body.musicPlatform);
+    }
+    if (Object.hasOwn(req.body || {}, 'accentColor')) {
+      updates.accent_color = validateAccentColor(req.body.accentColor);
+    }
+    const keys = Object.keys(updates);
+    if (keys.length) {
+      db.prepare(
+        `UPDATE users SET ${keys.map((key) => `${key} = ?`).join(', ')} WHERE id = ?`
+      ).run(...keys.map((key) => updates[key]), user.id);
+    }
+    res.json({ user: publicUser(db.prepare('SELECT * FROM users WHERE id = ?').get(user.id), { includePrivate: true }) });
+  })
+);
+
+app.post(
+  '/api/guest/import',
+  route((req, res) => {
+    const user = requireUser(req);
+    limitDbWrite(req, 'guest-import');
+    const imported = importGuestAlbums(user.id, req.body);
+    res.json({ imported, lists: getUserLists(user.id) });
+  })
+);
+
+app.get(
+  '/api/lists',
+  route((req, res) => {
+    const user = requireUser(req);
+    ensurePersonalList(user.id);
+    res.json({ lists: getUserLists(user.id) });
+  })
+);
+
+app.put(
+  '/api/me/albums/:albumKey/ratings/:trackKey',
+  route((req, res) => {
+    const user = requireUser(req);
+    limitDbWrite(req, 'rating-write');
+    const albumKeyValue = clampText(req.params.albumKey, 320);
+    const trackKeyValue = clampText(req.params.trackKey, 220);
+    if (!albumKeyValue || !trackKeyValue) throw httpError(400, 'Rating id is required.');
+
+    const existing = db
+      .prepare(
+        `SELECT track_title, include_in_average
+         FROM track_ratings
+         WHERE user_id = ? AND album_key = ? AND track_key = ?`
+      )
+      .get(user.id, albumKeyValue, trackKeyValue);
+    if (!existing) throw httpError(404, 'Rating not found.');
+
+    const rating = Number(req.body?.rating);
+    if (!Number.isInteger(rating) || rating < 0 || rating > 10) {
+      throw httpError(400, 'Rating must be a whole number from 0 to 10.');
+    }
+
+    const include =
+      req.body?.includeInAverage === undefined
+        ? existing.include_in_average
+        : req.body.includeInAverage === false
+          ? 0
+          : 1;
+    const trackTitle = clampText(req.body?.trackTitle || existing.track_title || 'Album rating', 160);
+    const ratedAt = nowIso();
+    db.prepare(
+      `UPDATE track_ratings
+       SET track_title = ?, rating = ?, include_in_average = ?, updated_at = ?
+       WHERE user_id = ? AND album_key = ? AND track_key = ?`
+    ).run(trackTitle, rating, include, ratedAt, user.id, albumKeyValue, trackKeyValue);
+
+    const metadata = albumMetadata(albumKeyValue);
+    upsertUserAlbumActivity(
+      user.id,
+      {
+        album_key: albumKeyValue,
+        title: metadata.title,
+        artist: metadata.artist || '',
+        cover_url: safeExternalImageUrl(metadata.cover_url)
+      },
+      {
+        ratedAt,
+        completedAt: userAlbumFullyListened(user.id, albumKeyValue) ? ratedAt : undefined
+      }
+    );
+
+    res.json(buildUserProfile(user.username, user));
+  })
+);
+
+app.get(
+  '/api/users/:username',
+  route((req, res) => {
+    res.json(buildUserProfile(req.params.username, req.user));
+  })
+);
+
+app.get(
+  '/api/users',
+  route((req, res) => {
+    const user = requireUser(req);
+    enforceRateLimit(req, 'user-search', {
+      limit: 60,
+      windowMs: 60 * 1000,
+      message: 'User search is temporarily rate limited. Try again shortly.'
+    });
+    res.json({ users: searchUsers(req.query.q, user.id) });
+  })
+);
+
+app.post(
+  '/api/lists',
+  route((req, res) => {
+    const user = requireUser(req);
+    enforceRateLimit(req, 'list-create', {
+      limit: 20,
+      windowMs: 60 * 60 * 1000,
+      message: 'List creation is temporarily rate limited. Try again later.'
+    });
+    const kind = req.body?.kind === 'collab' ? 'collab' : null;
+    if (!kind) throw httpError(400, 'Only collaborative lists can be created manually.');
+    const listId = createList(user.id, 'collab', req.body?.name || 'Shared Albums');
+    res.status(201).json({ list: buildListPayload(getListOrThrow(listId), user) });
+  })
+);
+
+app.get(
+  '/api/invitations',
+  route((req, res) => {
+    const user = requireUser(req);
+    res.json({ invites: getPendingInvites(user.id) });
+  })
+);
+
+app.post(
+  '/api/invitations/:inviteId/accept',
+  route((req, res) => {
+    const user = requireUser(req);
+    limitDbWrite(req, 'invite-response');
+    const invite = db
+      .prepare(
+        `SELECT li.*, l.kind
+         FROM list_invites li
+         JOIN lists l ON l.id = li.list_id
+         WHERE li.id = ? AND li.invitee_user_id = ? AND li.status = 'pending'`
+      )
+      .get(Number(req.params.inviteId), user.id);
+    if (!invite) throw httpError(404, 'Invite not found.');
+
+    transaction(() => {
+      db.prepare(
+        `INSERT OR IGNORE INTO list_members (list_id, user_id, role, joined_at)
+         VALUES (?, ?, ?, ?)`
+      ).run(invite.list_id, user.id, invite.role, nowIso());
+      db.prepare('UPDATE list_invites SET status = ?, responded_at = ? WHERE id = ?').run('accepted', nowIso(), invite.id);
+    })();
+
+    res.json({ ok: true, lists: getUserLists(user.id), invites: getPendingInvites(user.id) });
+  })
+);
+
+app.post(
+  '/api/invitations/:inviteId/decline',
+  route((req, res) => {
+    const user = requireUser(req);
+    limitDbWrite(req, 'invite-response');
+    const result = db
+      .prepare(
+        `UPDATE list_invites
+         SET status = 'declined', responded_at = ?
+         WHERE id = ? AND invitee_user_id = ? AND status = 'pending'`
+      )
+      .run(nowIso(), Number(req.params.inviteId), user.id);
+    if (!result.changes) throw httpError(404, 'Invite not found.');
+    res.json({ ok: true, invites: getPendingInvites(user.id) });
+  })
+);
+
+app.get(
+  '/api/lists/:id',
+  route((req, res) => {
+    const list = getListOrThrow(Number(req.params.id));
+    sendListPayload(req, res, list, req.user, false);
+  })
+);
+
+app.patch(
+  '/api/lists/:id',
+  route((req, res) => {
+    const user = requireUser(req);
+    limitDbWrite(req, 'list-settings');
+    const list = getListOrThrow(Number(req.params.id));
+    assertCanManage(list, user);
+    const name = req.body?.name === undefined ? list.name : clampText(req.body.name, 80);
+    const description = req.body?.description === undefined ? list.description : clampText(req.body.description, 500);
+    const visibility = ['private', 'unlisted', 'public'].includes(req.body?.visibility) ? req.body.visibility : list.visibility;
+    const showRatings = req.body?.showRatings === undefined ? list.show_ratings : req.body.showRatings ? 1 : 0;
+    if (!name) throw httpError(400, 'List name is required.');
+
+    db.prepare(
+      `UPDATE lists
+       SET name = ?, description = ?, visibility = ?, show_ratings = ?, updated_at = ?
+       WHERE id = ?`
+    ).run(name, description, visibility, showRatings, nowIso(), list.id);
+
+    res.json(buildListPayload(getListOrThrow(list.id), user));
+  })
+);
+
+app.post(
+  '/api/lists/:id/share/regenerate',
+  route((req, res) => {
+    const user = requireUser(req);
+    limitDbWrite(req, 'share-token');
+    const list = getListOrThrow(Number(req.params.id));
+    assertCanManage(list, user);
+    db.prepare('UPDATE lists SET share_token = ?, updated_at = ? WHERE id = ?').run(
+      uniqueTokenFor('lists', 'share_token'),
+      nowIso(),
+      list.id
+    );
+    res.json(buildListPayload(getListOrThrow(list.id), user));
+  })
+);
+
+app.post(
+  '/api/lists/:id/share/publish',
+  route((req, res) => {
+    const user = requireUser(req);
+    limitDbWrite(req, 'share-token');
+    const list = getListOrThrow(Number(req.params.id));
+    assertCanManage(list, user);
+    if (list.visibility === 'private') {
+      db.prepare('UPDATE lists SET visibility = ?, updated_at = ? WHERE id = ?').run('unlisted', nowIso(), list.id);
+    }
+    res.json(buildListPayload(getListOrThrow(list.id), user));
+  })
+);
+
+app.post(
+  '/api/lists/:id/invite/regenerate',
+  route((req, res) => {
+    const user = requireUser(req);
+    limitDbWrite(req, 'invite-token');
+    const list = getListOrThrow(Number(req.params.id));
+    assertCanManage(list, user);
+    if (list.kind !== 'collab') throw httpError(400, 'Only collaborative lists have invite links.');
+    db.prepare('UPDATE lists SET invite_token = ?, updated_at = ? WHERE id = ?').run(
+      uniqueTokenFor('lists', 'invite_token'),
+      nowIso(),
+      list.id
+    );
+    res.json(buildListPayload(getListOrThrow(list.id), user));
+  })
+);
+
+app.post(
+  '/api/lists/:id/invites',
+  route((req, res) => {
+    const user = requireUser(req);
+    limitInviteSending(req);
+    const list = getListOrThrow(Number(req.params.id));
+    assertCanManage(list, user);
+    if (list.kind !== 'collab') throw httpError(400, 'Only collaborative lists can invite people.');
+
+    const identifier = clampText(req.body?.identifier, 120);
+    if (!identifier) throw httpError(400, 'Username or email is required.');
+    const normalized = identifier.includes('@') ? normalizeEmail(identifier) : normalizeText(identifier);
+    const invitee = db
+      .prepare('SELECT * FROM users WHERE username_normalized = ? OR email_normalized = ?')
+      .get(normalized, normalized);
+    if (!invitee) throw httpError(404, 'No account found for that username or email.');
+    if (invitee.id === user.id) throw httpError(400, 'You already own this list.');
+    if (getMember(list.id, invitee.id)) throw httpError(409, 'That person is already on this list.');
+
+    const role = req.body?.role === 'viewer' ? 'viewer' : 'editor';
+    const existing = db
+      .prepare(
+        `SELECT id FROM list_invites
+         WHERE list_id = ? AND invitee_user_id = ? AND status = 'pending'`
+      )
+      .get(list.id, invitee.id);
+
+    if (existing) {
+      db.prepare('UPDATE list_invites SET role = ?, inviter_user_id = ?, created_at = ? WHERE id = ?').run(
+        role,
+        user.id,
+        nowIso(),
+        existing.id
+      );
+    } else {
+      db.prepare(
+        `INSERT INTO list_invites (list_id, inviter_user_id, invitee_user_id, role, status, created_at)
+         VALUES (?, ?, ?, ?, 'pending', ?)`
+      ).run(list.id, user.id, invitee.id, role, nowIso());
+    }
+
+    res.status(201).json({ ok: true });
+  })
+);
+
+app.get(
+  '/api/share/:token',
+  route((req, res) => {
+    const list = db.prepare('SELECT * FROM lists WHERE share_token = ?').get(req.params.token);
+    if (!list) throw httpError(404, 'Shared list not found.');
+    sendListPayload(req, res, list, req.user, true);
+  })
+);
+
+app.post(
+  '/api/invites/:token/join',
+  route((req, res) => {
+    const user = requireUser(req);
+    limitDbWrite(req, 'invite-join');
+    const list = db.prepare('SELECT * FROM lists WHERE invite_token = ? AND kind = ?').get(req.params.token, 'collab');
+    if (!list) throw httpError(404, 'Invite link not found.');
+    db.prepare(
+      `INSERT OR IGNORE INTO list_members (list_id, user_id, role, joined_at)
+       VALUES (?, ?, 'editor', ?)`
+    ).run(list.id, user.id, nowIso());
+    res.json(buildListPayload(list, user));
+  })
+);
+
+app.post(
+  '/api/lists/:id/albums',
+  route((req, res) => {
+    const user = requireUser(req);
+    limitDbWrite(req, 'album-write');
+    const list = getListOrThrow(Number(req.params.id));
+    assertCanEdit(list, user);
+    const title = clampText(req.body?.title, 160);
+    if (!title) throw httpError(400, 'Album title is required.');
+    const artist = clampText(req.body?.artist, 160);
+    const existing = findAlbumInList(list.id, title, artist);
+    if (existing) {
+      updateExistingAlbumFromInput(existing, req.body, list.id);
+      res.json({
+        copied: false,
+        albumId: existing.id,
+        ...buildListMutationResponse(getListOrThrow(list.id), user, {
+          albumId: existing.id,
+          includeListSummary: true
+        })
+      });
+      return;
+    }
+    const albumId = transaction(() => {
+      const id = insertAlbum(list.id, user.id, req.body);
+      db.prepare('UPDATE lists SET updated_at = ? WHERE id = ?').run(nowIso(), list.id);
+      return id;
+    })();
+    res.status(201).json({
+      albumId,
+      ...buildListMutationResponse(getListOrThrow(list.id), user, {
+        albumId,
+        includeListSummary: true
+      })
+    });
+  })
+);
+
+app.post(
+  '/api/lists/:id/albums/copy',
+  route((req, res) => {
+    const user = requireUser(req);
+    limitDbWrite(req, 'album-write');
+    const list = getListOrThrow(Number(req.params.id));
+    assertCanEdit(list, user);
+    const title = clampText(req.body?.title, 160);
+    if (!title) throw httpError(400, 'Album title is required.');
+    const artist = clampText(req.body?.artist, 160);
+    const existing = findAlbumInList(list.id, title, artist);
+    if (existing) {
+      updateExistingAlbumFromInput(existing, req.body, list.id);
+      res.json({
+        copied: false,
+        albumId: existing.id,
+        ...buildListMutationResponse(getListOrThrow(list.id), user, {
+          albumId: existing.id,
+          includeListSummary: true
+        })
+      });
+      return;
+    }
+
+    const albumId = transaction(() => {
+      const id = insertAlbum(list.id, user.id, req.body);
+      db.prepare('UPDATE lists SET updated_at = ? WHERE id = ?').run(nowIso(), list.id);
+      return id;
+    })();
+    res.status(201).json({
+      copied: true,
+      albumId,
+      ...buildListMutationResponse(getListOrThrow(list.id), user, {
+        albumId,
+        includeListSummary: true
+      })
+    });
+  })
+);
+
+app.post(
+  '/api/lists/:id/albums/:albumId/cover/refresh',
+  route(async (req, res) => {
+    const user = requireUser(req);
+    limitAlbumLookup(req);
+    limitDbWrite(req, 'cover-refresh');
+    const list = getListOrThrow(Number(req.params.id));
+    assertCanEdit(list, user);
+    const album = db.prepare('SELECT * FROM list_albums WHERE id = ? AND list_id = ?').get(Number(req.params.albumId), list.id);
+    if (!album) throw httpError(404, 'Album not found.');
+
+    const force = req.body?.force === true;
+    const currentCoverUrl = safeExternalImageUrl(album.cover_url);
+    const currentStillWorks = !force && currentCoverUrl ? await imageUrlWorks(currentCoverUrl) : false;
+    const refreshedCoverUrl = currentStillWorks
+      ? currentCoverUrl
+      : await resolveVerifiedAlbumCover(album.title, album.artist, itunesCountry(req), force ? [currentCoverUrl, req.body?.brokenUrl] : []);
+    const nextCoverUrl = refreshedCoverUrl || (force ? '' : currentCoverUrl);
+
+    transaction(() => {
+      db.prepare('UPDATE list_albums SET cover_url = ?, updated_at = ? WHERE id = ? AND list_id = ?').run(
+        nextCoverUrl,
+        nowIso(),
+        album.id,
+        list.id
+      );
+      db.prepare('UPDATE lists SET updated_at = ? WHERE id = ?').run(nowIso(), list.id);
+    })();
+
+    res.json({
+      coverUrl: nextCoverUrl,
+      ...buildListMutationResponse(getListOrThrow(list.id), user, {
+        albumId: album.id,
+        includeListSummary: true
+      })
+    });
+  })
+);
+
+app.post(
+  '/api/lists/:id/messages',
+  route((req, res) => {
+    const user = requireUser(req);
+    limitChatMessage(req);
+    const list = getListOrThrow(Number(req.params.id));
+    const member = assertCanView(list, user);
+    if (!member) throw httpError(403, 'Only list members can chat.');
+    if (list.kind !== 'collab') throw httpError(400, 'Only collaborative lists have chat.');
+    const body = clampText(req.body?.body, 800);
+    if (!body) throw httpError(400, 'Message cannot be empty.');
+    db.prepare('INSERT INTO list_messages (list_id, user_id, body, created_at) VALUES (?, ?, ?, ?)').run(
+      list.id,
+      user.id,
+      body,
+      nowIso()
+    );
+    res.status(201).json(buildListPayload(getListOrThrow(list.id), user));
+  })
+);
+
+app.patch(
+  '/api/lists/:id/albums/:albumId',
+  route((req, res) => {
+    const user = requireUser(req);
+    limitDbWrite(req, 'album-write');
+    const list = getListOrThrow(Number(req.params.id));
+    assertCanEdit(list, user);
+    const album = db.prepare('SELECT * FROM list_albums WHERE id = ? AND list_id = ?').get(Number(req.params.albumId), list.id);
+    if (!album) throw httpError(404, 'Album not found.');
+
+    const title = req.body?.title === undefined ? album.title : clampText(req.body.title, 160);
+    if (!title) throw httpError(400, 'Album title is required.');
+    const artist = req.body?.artist === undefined ? album.artist : clampText(req.body.artist, 160);
+    const coverUrl = req.body?.coverUrl === undefined ? album.cover_url : validateCoverUrl(req.body.coverUrl);
+    const notes = req.body?.notes === undefined ? album.notes : clampText(req.body.notes, 1200);
+    const key = albumKey(title, artist);
+
+    transaction(() => {
+      db.prepare(
+        `UPDATE list_albums
+         SET title = ?, artist = ?, album_key = ?, cover_url = ?, notes = ?, updated_at = ?
+         WHERE id = ? AND list_id = ?`
+      ).run(title, artist, key, coverUrl, notes, nowIso(), album.id, list.id);
+      if (Array.isArray(req.body?.tracks)) replaceAlbumTracks(album.id, req.body.tracks);
+      db.prepare('UPDATE lists SET updated_at = ? WHERE id = ?').run(nowIso(), list.id);
+    })();
+
+    res.json(buildListPayload(getListOrThrow(list.id), user));
+  })
+);
+
+app.delete(
+  '/api/lists/:id/albums/by-key',
+  route((req, res) => {
+    const user = requireUser(req);
+    limitDbWrite(req, 'album-write');
+    const list = getListOrThrow(Number(req.params.id));
+    assertCanView(list, user);
+    const title = clampText(req.body?.title, 160);
+    if (!title) throw httpError(400, 'Album title is required.');
+    const artist = clampText(req.body?.artist, 160);
+    const album = findAlbumInList(list.id, title, artist);
+    if (!album) {
+      res.json({
+        removed: false,
+        albumId: null,
+        ...buildListMutationResponse(getListOrThrow(list.id), user, {
+          includeListSummary: true
+        })
+      });
+      return;
+    }
+
+    const result = removeListAlbum(list, user, album);
+    res.json({
+      ...result,
+      ...buildListMutationResponse(getListOrThrow(list.id), user, {
+        albumId: result.removed ? null : album.id,
+        includeListSummary: true,
+        removedAlbumId: result.removed ? result.albumId : null
+      })
+    });
+  })
+);
+
+app.delete(
+  '/api/lists/:id/albums/:albumId',
+  route((req, res) => {
+    const user = requireUser(req);
+    limitDbWrite(req, 'album-write');
+    const list = getListOrThrow(Number(req.params.id));
+    const album = db.prepare('SELECT * FROM list_albums WHERE id = ? AND list_id = ?').get(Number(req.params.albumId), list.id);
+    if (!album) throw httpError(404, 'Album not found.');
+
+    const result = removeListAlbum(list, user, album);
+    res.json({
+      ...result,
+      ...buildListMutationResponse(getListOrThrow(list.id), user, {
+        albumId: result.removed ? null : album.id,
+        includeListSummary: true,
+        removedAlbumId: result.removed ? result.albumId : null
+      })
+    });
+  })
+);
+
+app.post(
+  '/api/lists/:id/albums/:albumId/complete',
+  route((req, res) => {
+    const user = requireUser(req);
+    limitDbWrite(req, 'completion-write');
+    const list = getListOrThrow(Number(req.params.id));
+    const member = assertCanView(list, user);
+    if (!member) throw httpError(403, 'Only list members can mark albums complete.');
+    const album = db.prepare('SELECT * FROM list_albums WHERE id = ? AND list_id = ?').get(Number(req.params.albumId), list.id);
+    if (!album) throw httpError(404, 'Album not found.');
+
+    if (req.body?.completed === false) {
+      db.prepare('DELETE FROM album_completions WHERE list_album_id = ? AND user_id = ?').run(album.id, user.id);
+      db.prepare('UPDATE user_album_activity SET completed_at = NULL, updated_at = ? WHERE user_id = ? AND album_key = ?').run(
+        nowIso(),
+        user.id,
+        album.album_key
+      );
+    } else {
+      const completedAt = nowIso();
+      db.prepare(
+        `INSERT INTO album_completions (list_album_id, user_id, completed_at)
+         VALUES (?, ?, ?)
+         ON CONFLICT(list_album_id, user_id) DO UPDATE SET completed_at = excluded.completed_at`
+      ).run(album.id, user.id, completedAt);
+      upsertUserAlbumActivity(user.id, album, { completedAt });
+    }
+
+    res.json(
+      buildListMutationResponse(getListOrThrow(list.id), user, {
+        albumId: album.id
+      })
+    );
+  })
+);
+
+app.patch(
+  '/api/lists/:id/albums/:albumId/rating-preferences',
+  route((req, res) => {
+    const user = requireUser(req);
+    limitDbWrite(req, 'rating-write');
+    const list = getListOrThrow(Number(req.params.id));
+    const member = assertCanView(list, user);
+    if (!member) throw httpError(403, 'Only list members can rate albums.');
+    const album = db.prepare('SELECT * FROM list_albums WHERE id = ? AND list_id = ?').get(Number(req.params.albumId), list.id);
+    if (!album) throw httpError(404, 'Album not found.');
+    const include = req.body?.includeInAverage === false ? 0 : 1;
+    db.prepare(
+      `INSERT INTO album_average_opt_in (user_id, album_key, include_in_average, updated_at)
+       VALUES (?, ?, ?, ?)
+       ON CONFLICT(user_id, album_key) DO UPDATE
+       SET include_in_average = excluded.include_in_average, updated_at = excluded.updated_at`
+    ).run(user.id, album.album_key, include, nowIso());
+    res.json(
+      buildListMutationResponse(getListOrThrow(list.id), user, {
+        albumId: album.id
+      })
+    );
+  })
+);
+
+app.put(
+  '/api/lists/:id/albums/:albumId/rating',
+  route((req, res) => {
+    const user = requireUser(req);
+    limitDbWrite(req, 'rating-write');
+    const list = getListOrThrow(Number(req.params.id));
+    const member = assertCanView(list, user);
+    if (!member) throw httpError(403, 'Only list members can rate albums.');
+    const album = db.prepare('SELECT * FROM list_albums WHERE id = ? AND list_id = ?').get(Number(req.params.albumId), list.id);
+    if (!album) throw httpError(404, 'Album not found.');
+
+    const rating = Number(req.body?.rating);
+    if (!Number.isInteger(rating) || rating < 0 || rating > 10) {
+      throw httpError(400, 'Rating must be a whole number from 0 to 10.');
+    }
+    const existingRating = db
+      .prepare('SELECT include_in_average FROM track_ratings WHERE user_id = ? AND album_key = ? AND track_key = ?')
+      .get(user.id, album.album_key, albumLevelTrackKey);
+    const include =
+      req.body?.includeInAverage === undefined ? existingRating?.include_in_average ?? 1 : req.body.includeInAverage === false ? 0 : 1;
+
+    transaction(() => {
+      const ratedAt = nowIso();
+      db.prepare(
+        `INSERT INTO track_ratings (user_id, album_key, track_key, track_title, rating, include_in_average, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(user_id, album_key, track_key) DO UPDATE
+         SET track_title = excluded.track_title,
+             rating = excluded.rating,
+             include_in_average = excluded.include_in_average,
+             updated_at = excluded.updated_at`
+      ).run(user.id, album.album_key, albumLevelTrackKey, 'Album rating', rating, include, ratedAt);
+      upsertUserAlbumActivity(user.id, album, {
+        ratedAt,
+        completedAt: userAlbumFullyListened(user.id, album.album_key) ? ratedAt : undefined
+      });
+    })();
+
+    res.json(
+      buildListMutationResponse(getListOrThrow(list.id), user, {
+        albumId: album.id
+      })
+    );
+  })
+);
+
+app.put(
+  '/api/lists/:id/albums/:albumId/tracks/:trackId/rating',
+  route((req, res) => {
+    const user = requireUser(req);
+    limitDbWrite(req, 'rating-write');
+    const list = getListOrThrow(Number(req.params.id));
+    const member = assertCanView(list, user);
+    if (!member) throw httpError(403, 'Only list members can rate tracks.');
+    const album = db.prepare('SELECT * FROM list_albums WHERE id = ? AND list_id = ?').get(Number(req.params.albumId), list.id);
+    if (!album) throw httpError(404, 'Album not found.');
+    const track = db.prepare('SELECT * FROM album_tracks WHERE id = ? AND list_album_id = ?').get(Number(req.params.trackId), album.id);
+    if (!track) throw httpError(404, 'Track not found.');
+
+    const rating = Number(req.body?.rating);
+    if (!Number.isInteger(rating) || rating < 0 || rating > 10) {
+      throw httpError(400, 'Rating must be a whole number from 0 to 10.');
+    }
+    const existingRating = db
+      .prepare('SELECT include_in_average FROM track_ratings WHERE user_id = ? AND album_key = ? AND track_key = ?')
+      .get(user.id, album.album_key, track.track_key);
+    const include =
+      req.body?.includeInAverage === undefined ? existingRating?.include_in_average ?? 1 : req.body.includeInAverage === false ? 0 : 1;
+
+    transaction(() => {
+      const ratedAt = nowIso();
+      db.prepare(
+        `INSERT INTO track_ratings (user_id, album_key, track_key, track_title, rating, include_in_average, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(user_id, album_key, track_key) DO UPDATE
+         SET track_title = excluded.track_title,
+             rating = excluded.rating,
+             include_in_average = excluded.include_in_average,
+             updated_at = excluded.updated_at`
+      ).run(user.id, album.album_key, track.track_key, track.title, rating, include, ratedAt);
+      upsertUserAlbumActivity(user.id, album, { ratedAt });
+      maybeAutoCompleteAlbum(list, album, user.id);
+    })();
+
+    res.json(
+      buildListMutationResponse(getListOrThrow(list.id), user, {
+        albumId: album.id
+      })
+    );
+  })
+);
+
+app.patch(
+  '/api/lists/:id/albums/:albumId/tracks/:trackId/rating-preferences',
+  route((req, res) => {
+    const user = requireUser(req);
+    limitDbWrite(req, 'rating-write');
+    const list = getListOrThrow(Number(req.params.id));
+    const member = assertCanView(list, user);
+    if (!member) throw httpError(403, 'Only list members can rate tracks.');
+    const album = db.prepare('SELECT * FROM list_albums WHERE id = ? AND list_id = ?').get(Number(req.params.albumId), list.id);
+    if (!album) throw httpError(404, 'Album not found.');
+    const track = db.prepare('SELECT * FROM album_tracks WHERE id = ? AND list_album_id = ?').get(Number(req.params.trackId), album.id);
+    if (!track) throw httpError(404, 'Track not found.');
+
+    const existingRating = db
+      .prepare('SELECT id FROM track_ratings WHERE user_id = ? AND album_key = ? AND track_key = ?')
+      .get(user.id, album.album_key, track.track_key);
+    if (!existingRating) throw httpError(400, 'Rate this track before excluding it from album ratings.');
+
+    const include = req.body?.includeInAverage === false ? 0 : 1;
+    db.prepare(
+      `UPDATE track_ratings
+       SET include_in_average = ?, updated_at = ?
+       WHERE id = ?`
+    ).run(include, nowIso(), existingRating.id);
+
+    res.json(
+      buildListMutationResponse(getListOrThrow(list.id), user, {
+        albumId: album.id
+      })
+    );
+  })
+);
+
+app.delete(
+  '/api/lists/:id/albums/:albumId/tracks/:trackId/rating',
+  route((req, res) => {
+    const user = requireUser(req);
+    limitDbWrite(req, 'rating-write');
+    const list = getListOrThrow(Number(req.params.id));
+    const member = assertCanView(list, user);
+    if (!member) throw httpError(403, 'Only list members can rate tracks.');
+    const album = db.prepare('SELECT * FROM list_albums WHERE id = ? AND list_id = ?').get(Number(req.params.albumId), list.id);
+    if (!album) throw httpError(404, 'Album not found.');
+    const track = db.prepare('SELECT * FROM album_tracks WHERE id = ? AND list_album_id = ?').get(Number(req.params.trackId), album.id);
+    if (!track) throw httpError(404, 'Track not found.');
+    db.prepare('DELETE FROM track_ratings WHERE user_id = ? AND album_key = ? AND track_key = ?').run(user.id, album.album_key, track.track_key);
+    res.json(buildListPayload(getListOrThrow(list.id), user));
+  })
+);
+
+app.patch(
+  '/api/lists/:id/members/:userId',
+  route((req, res) => {
+    const user = requireUser(req);
+    limitDbWrite(req, 'member-write');
+    const list = getListOrThrow(Number(req.params.id));
+    assertCanManage(list, user);
+    const targetUserId = Number(req.params.userId);
+    if (targetUserId === list.owner_user_id) throw httpError(400, 'The owner role cannot be changed.');
+    if (!['editor', 'viewer'].includes(req.body?.role)) throw httpError(400, 'Role must be editor or viewer.');
+    db.prepare('UPDATE list_members SET role = ? WHERE list_id = ? AND user_id = ?').run(req.body.role, list.id, targetUserId);
+    res.json(buildListPayload(getListOrThrow(list.id), user));
+  })
+);
+
+app.delete(
+  '/api/lists/:id/members/:userId',
+  route((req, res) => {
+    const user = requireUser(req);
+    limitDbWrite(req, 'member-write');
+    const list = getListOrThrow(Number(req.params.id));
+    if (list.kind !== 'collab') throw httpError(400, 'Only shared lists have removable members.');
+    const targetUserId = Number(req.params.userId);
+    const removingSelf = targetUserId === user.id;
+    if (removingSelf) assertCanView(list, user);
+    else assertCanManage(list, user);
+    if (targetUserId === list.owner_user_id) throw httpError(400, 'The owner cannot leave without transferring ownership first.');
+    if (!getMember(list.id, targetUserId)) throw httpError(404, 'Member not found.');
+
+    transaction(() => {
+      db.prepare('DELETE FROM list_members WHERE list_id = ? AND user_id = ?').run(list.id, targetUserId);
+      db.prepare(
+        `DELETE FROM list_album_removal_votes
+         WHERE user_id = ?
+           AND list_album_id IN (SELECT id FROM list_albums WHERE list_id = ?)`
+      ).run(targetUserId, list.id);
+      db.prepare('UPDATE lists SET updated_at = ? WHERE id = ?').run(nowIso(), list.id);
+    })();
+
+    const payload = removingSelf ? null : buildListPayload(getListOrThrow(list.id), user);
+    res.json({ ok: true, lists: getUserLists(user.id), list: payload });
+  })
+);
+
+app.get(
+  '/api/history/:token',
+  route((req, res) => {
+    const owner = db.prepare('SELECT * FROM users WHERE history_token = ?').get(req.params.token);
+    if (!owner || owner.history_visibility !== 'unlisted') throw httpError(404, 'History not found.');
+
+    const completions = db
+      .prepare(
+        `WITH activity_completed AS (
+           SELECT completed_at, album_key, title, artist, cover_url, '' AS list_name
+           FROM user_album_activity
+           WHERE user_id = ? AND completed_at IS NOT NULL
+         ),
+         legacy_completed AS (
+           SELECT MAX(ac.completed_at) AS completed_at, la.album_key, MAX(la.title) AS title,
+                  MAX(la.artist) AS artist, MAX(la.cover_url) AS cover_url, MAX(l.name) AS list_name
+           FROM album_completions ac
+           JOIN list_albums la ON la.id = ac.list_album_id
+           JOIN lists l ON l.id = la.list_id
+           WHERE ac.user_id = ?
+             AND NOT EXISTS (
+               SELECT 1
+               FROM user_album_activity activity
+               WHERE activity.user_id = ac.user_id
+                 AND activity.album_key = la.album_key
+                 AND activity.completed_at IS NOT NULL
+             )
+           GROUP BY la.album_key
+         )
+         SELECT * FROM activity_completed
+         UNION ALL
+         SELECT * FROM legacy_completed
+         ORDER BY completed_at DESC
+         LIMIT 200`
+      )
+      .all(owner.id, owner.id)
+      .map((completion) => {
+        const metadata = albumMetadata(completion.album_key);
+        return {
+          completedAt: completion.completed_at,
+          albumKey: completion.album_key,
+          title: completion.title || metadata.title,
+          artist: completion.artist || metadata.artist || '',
+          coverUrl: safeExternalImageUrl(completion.cover_url) || safeExternalImageUrl(metadata.cover_url),
+          listName: completion.list_name,
+          aggregate: albumRatingAggregate(completion.album_key),
+          myRatings: db
+            .prepare(
+              `SELECT track_key, track_title, rating, include_in_average, updated_at
+               FROM track_ratings
+               WHERE user_id = ? AND album_key = ?
+               ORDER BY track_key = ? DESC, track_title COLLATE NOCASE`
+            )
+            .all(owner.id, completion.album_key, albumLevelTrackKey)
+            .map((rating) => ({
+              trackKey: rating.track_key,
+              trackTitle: rating.track_title,
+              rating: rating.rating,
+              includeInAverage: Boolean(rating.include_in_average),
+              updatedAt: rating.updated_at
+            }))
+        };
+      });
+
+    res.json({ user: publicUser(owner), completions });
+  })
+);
+
+app.use('/api', (req, res) => {
+  res.status(404).json({ error: { message: 'Not found.', status: 404 } });
+});
+
+app.get('*', (req, res) => {
+  res.sendFile(path.join(publicDir, 'index.html'));
+});
+
+app.use((err, req, res, next) => {
+  if (res.headersSent) {
+    next(err);
+    return;
+  }
+  const status = err.status || 500;
+  if (status >= 500) {
+    console.error(err);
+  }
+  if (err.retryAfter) {
+    res.setHeader('Retry-After', String(err.retryAfter));
+  }
+  res.status(status).json({
+    error: {
+      message: status >= 500 ? 'Something went wrong.' : err.message,
+      status
+    }
+  });
+});
+
+cleanupExpiredSessions();
+
+const server = app.listen(config.port, () => {
+  console.log(`Albums app listening on http://localhost:${config.port}`);
+});
+
+function shutdown(signal) {
+  console.log(`${signal} received. Closing HTTP server and SQLite database.`);
+  server.close((error) => {
+    if (error) {
+      console.error(error);
+      process.exitCode = 1;
+    }
+    try {
+      closeDatabase();
+    } catch (closeError) {
+      console.error(closeError);
+      process.exitCode = 1;
+    }
+    process.exit();
+  });
+
+  setTimeout(() => {
+    console.error('Shutdown timed out.');
+    process.exit(1);
+  }, 10_000).unref();
+}
+
+process.on('SIGINT', () => shutdown('SIGINT'));
+process.on('SIGTERM', () => shutdown('SIGTERM'));

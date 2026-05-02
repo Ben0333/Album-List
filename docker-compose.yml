@@ -1,0 +1,17 @@
+services:
+  app:
+    build: .
+    image: albums-app:local
+    container_name: albums-app
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      PORT: 3000
+      DATABASE_PATH: /data/albums.sqlite
+      # NODE_ENV, APP_ORIGIN, COOKIE_SECURE, TRUST_PROXY, SESSION_DAYS come from .env
+    env_file:
+      - path: .env
+        required: false
+    volumes:
+      - ./data:/data

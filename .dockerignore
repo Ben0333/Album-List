@@ -1,0 +1,17 @@
+.git
+.gitignore
+.github
+**/node_modules
+**/.env
+**/.env.*
+!**/.env.example
+**/data/*.sqlite
+**/data/*.sqlite-*
+**/dist
+DEV_README.md
+README.md
+**/.DS_Store
+**/.server.pid
+**/*.bat
+docker-compose.yml
+Dockerfile

@@ -1,0 +1,23 @@
+{
+  "name": "@albums/server",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js",
+    "check": "node --check src/server.js && node --check src/explore-data.js"
+  },
+  "dependencies": {
+    "@albums/shared": "*",
+    "bcryptjs": "^2.4.3",
+    "compression": "^1.8.1",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "helmet": "^8.1.0"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}
