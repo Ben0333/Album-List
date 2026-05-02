@@ -1,47 +1,73 @@
 <script lang="ts">
-  import { route, navigate } from '$lib/router.svelte';
-  import { api } from '$lib/api';
+  import { onMount } from 'svelte';
+  import { appState } from '$lib/state.svelte';
+  import { router } from '$lib/router.svelte';
+  import { applyTheme, watchSystemTheme } from '$lib/theme';
+  import { refreshMe } from '$lib/me';
+  import { navigate } from '$lib/router.svelte';
+  import UtilityBar from './components/UtilityBar.svelte';
+  import ToastNotice from './components/ToastNotice.svelte';
+  import Login from './routes/Login.svelte';
+  import Home from './routes/Home.svelte';
+  import Placeholder from './routes/Placeholder.svelte';
 
-  let health = $state<string>('…');
+  let booted = $state<boolean>(false);
+  let bootError = $state<string>('');
 
-  $effect(() => {
-    api.get<{ ok: boolean; database: string }>('/api/health')
-      .then((data) => (health = data.ok ? `ok (db ${data.database})` : 'not ok'))
-      .catch((err: unknown) => (health = `error: ${(err as Error).message}`));
+  onMount(() => {
+    applyTheme(appState.themePreference);
+    const stop = watchSystemTheme(() => applyTheme(appState.themePreference));
+    refreshMe()
+      .catch((err: Error) => {
+        bootError = err.message;
+      })
+      .finally(() => {
+        booted = true;
+      });
+    return stop;
   });
+
+  // Intercept internal link clicks so SPA navigation works without full reloads.
+  function onAppClick(event: MouseEvent): void {
+    if (event.defaultPrevented || event.button !== 0) return;
+    if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+    const anchor = (event.target as HTMLElement).closest('a');
+    if (!anchor) return;
+    const href = anchor.getAttribute('href');
+    if (!href || href.startsWith('http') || href.startsWith('//') || href.startsWith('#') || href.startsWith('mailto:')) return;
+    if (anchor.target && anchor.target !== '_self') return;
+    event.preventDefault();
+    navigate(href);
+  }
 </script>
 
-<main>
-  <h1>Albums to Listen To</h1>
-  <p>Svelte scaffold is up. Frontend port pending.</p>
-  <p>Current path: <code>{route.path}</code></p>
-  <p>Server health: <code>{health}</code></p>
-  <p>
-    <button onclick={() => navigate('/explore')}>navigate /explore</button>
-    <button onclick={() => navigate('/')}>navigate /</button>
-  </p>
-</main>
-
-<style>
-  main {
-    font-family: system-ui, -apple-system, sans-serif;
-    max-width: 40rem;
-    margin: 4rem auto;
-    padding: 0 1.5rem;
-    line-height: 1.5;
-  }
-  h1 {
-    margin-bottom: 0.5rem;
-  }
-  button {
-    font: inherit;
-    padding: 0.4rem 0.75rem;
-    border-radius: 0.375rem;
-    border: 1px solid currentColor;
-    background: transparent;
-    cursor: pointer;
-  }
-  button + button {
-    margin-left: 0.5rem;
-  }
-</style>
+<div class="app-shell" onclickcapture={onAppClick} role="presentation">
+  <UtilityBar />
+  {#if appState.notice}
+    <ToastNotice message={appState.notice} onDismiss={() => (appState.notice = '')} />
+  {/if}
+  {#if appState.error}
+    <ToastNotice message={appState.error} onDismiss={() => (appState.error = '')} />
+  {/if}
+  {#if !booted}
+    <Placeholder title="Loading…" />
+  {:else if bootError}
+    <Placeholder title="Connection error" note={bootError} />
+  {:else if router.current.type === 'login'}
+    <Login />
+  {:else if router.current.type === 'home'}
+    <Home />
+  {:else if router.current.type === 'list'}
+    <Placeholder title="List" note="List view port pending." />
+  {:else if router.current.type === 'share'}
+    <Placeholder title="Shared list" note="Shared-list view port pending." />
+  {:else if router.current.type === 'invite'}
+    <Placeholder title="Invitation" note="Invite acceptance flow port pending." />
+  {:else if router.current.type === 'history'}
+    <Placeholder title="History" note="History view port pending." />
+  {:else if router.current.type === 'profile'}
+    <Placeholder title="Profile" note="Profile view port pending." />
+  {:else if router.current.type === 'explore'}
+    <Placeholder title="Explore" note="Explore view port pending." />
+  {/if}
+</div>
