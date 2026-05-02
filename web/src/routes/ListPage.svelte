@@ -1,20 +1,23 @@
 <script lang="ts">
   import { appState } from '$lib/state.svelte';
-  import { router, navigate } from '$lib/router.svelte';
+  import { router } from '$lib/router.svelte';
   import { api, ApiError } from '$lib/api';
-  import type { ListPayload } from '$lib/types';
+  import type { ListAlbum, ListPayload } from '$lib/types';
   import IconButton from '../components/IconButton.svelte';
   import AlbumRow from '../components/AlbumRow.svelte';
   import AlbumSearch from '../components/AlbumSearch.svelte';
   import type { AlbumDetail } from '../components/AlbumSearch.svelte';
   import ListSwitcher from '../components/ListSwitcher.svelte';
+  import SharePanel from '../components/SharePanel.svelte';
+  import PeoplePanel from '../components/PeoplePanel.svelte';
   import Placeholder from './Placeholder.svelte';
-  import type { ListAlbum } from '$lib/types';
 
   let payload = $state<ListPayload | null>(null);
   let loading = $state<boolean>(true);
   let loadError = $state<string>('');
   let highlightAlbumId = $state<number | null>(null);
+  let shareOpen = $state<boolean>(false);
+  let peopleOpen = $state<boolean>(false);
 
   $effect(() => {
     const route = router.current;
@@ -23,6 +26,8 @@
     let cancelled = false;
     loading = true;
     loadError = '';
+    shareOpen = false;
+    peopleOpen = false;
     api
       .get<ListPayload>(`/api/lists/${id}`)
       .then((data) => {
@@ -62,6 +67,9 @@
   }
 
   const pathPrefix = $derived(payload ? `/list/${payload.list.id}` : '');
+  const canShare = $derived(
+    payload ? payload.list.visibility !== 'private' || payload.permissions.canManage : false
+  );
 
   async function addAlbum(album: AlbumDetail): Promise<void> {
     if (!payload) return;
@@ -97,7 +105,35 @@
         {#if payload.albums.length}
           <IconButton icon="dice" label="Shuffle" onclick={shuffle} />
         {/if}
+        {#if payload.permissions.canManage}
+          <IconButton
+            icon="gear"
+            label="Settings"
+            active={appState.settingsOpen}
+            onclick={() => (appState.settingsOpen = !appState.settingsOpen)}
+          />
+        {/if}
+        {#if payload.permissions.isMember && payload.list.kind === 'collab'}
+          <IconButton
+            icon="users"
+            label="People"
+            active={peopleOpen}
+            onclick={() => (peopleOpen = !peopleOpen)}
+          />
+        {/if}
+        {#if canShare}
+          <IconButton
+            icon="share"
+            label="Share"
+            active={shareOpen}
+            onclick={() => (shareOpen = !shareOpen)}
+          />
+        {/if}
       </div>
+
+      {#if shareOpen}
+        <SharePanel payload={payload} onPayloadUpdate={(next) => (payload = next)} />
+      {/if}
 
       <AlbumSearch enabled={payload.permissions.canEdit} onPick={addAlbum} />
 
@@ -116,6 +152,10 @@
           <div class="empty-minimal">No albums yet.</div>
         {/if}
       </section>
+
+      {#if peopleOpen}
+        <PeoplePanel payload={payload} onPayloadUpdate={(next) => (payload = next)} />
+      {/if}
     </section>
   </main>
 {/if}

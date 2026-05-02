@@ -9,18 +9,22 @@
   }
 
   let { payload }: Props = $props();
-  let name = $state<string>(payload.list.name);
-  let description = $state<string>(payload.list.description ?? '');
-  let visibility = $state<'private' | 'unlisted' | 'public'>(payload.list.visibility);
-  let showRatings = $state<boolean>(payload.list.showRatings);
+  let name = $state<string>('');
+  let description = $state<string>('');
+  let visibility = $state<'private' | 'unlisted' | 'public'>('private');
+  let showRatings = $state<boolean>(true);
   let busy = $state<boolean>(false);
   let saveError = $state<string>('');
+  let lastListId = -1;
 
   $effect(() => {
-    name = payload.list.name;
-    description = payload.list.description ?? '';
-    visibility = payload.list.visibility;
-    showRatings = payload.list.showRatings;
+    if (payload.list.id !== lastListId) {
+      name = payload.list.name;
+      description = payload.list.description ?? '';
+      visibility = payload.list.visibility;
+      showRatings = payload.list.showRatings;
+      lastListId = payload.list.id;
+    }
   });
 
   async function save(event: SubmitEvent): Promise<void> {
