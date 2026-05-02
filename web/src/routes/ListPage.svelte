@@ -1,8 +1,8 @@
 <script lang="ts">
-  import { appState } from '$lib/state.svelte';
+  import { appState, persistChatOpen } from '$lib/state.svelte';
   import { router } from '$lib/router.svelte';
   import { api, ApiError } from '$lib/api';
-  import type { ListAlbum, ListPayload } from '$lib/types';
+  import type { ListAlbum, ListPayload, NotModifiedPayload } from '$lib/types';
   import IconButton from '../components/IconButton.svelte';
   import AlbumRow from '../components/AlbumRow.svelte';
   import AlbumSearch from '../components/AlbumSearch.svelte';
@@ -10,7 +10,10 @@
   import ListSwitcher from '../components/ListSwitcher.svelte';
   import SharePanel from '../components/SharePanel.svelte';
   import PeoplePanel from '../components/PeoplePanel.svelte';
+  import ChatPanel from '../components/ChatPanel.svelte';
   import Placeholder from './Placeholder.svelte';
+
+  const POLL_INTERVAL_MS = 5000;
 
   let payload = $state<ListPayload | null>(null);
   let loading = $state<boolean>(true);
@@ -52,6 +55,45 @@
     if (payload) appState.currentListPayload = payload;
   });
 
+  $effect(() => {
+    if (!payload || payload.list.kind !== 'collab' || !payload.permissions.isMember) return;
+    let cancelled = false;
+    let timer: number | null = null;
+
+    async function tick(): Promise<void> {
+      if (cancelled || !payload) return;
+      try {
+        const data = await api.get<ListPayload | NotModifiedPayload>(
+          `/api/lists/${payload.list.id}?revision=${encodeURIComponent(payload.revision)}`
+        );
+        if (cancelled) return;
+        if ('notModified' in data) return;
+        payload = data;
+      } catch {
+        // ignore transient errors
+      } finally {
+        if (!cancelled) timer = window.setTimeout(tick, POLL_INTERVAL_MS);
+      }
+    }
+
+    timer = window.setTimeout(tick, POLL_INTERVAL_MS);
+    return () => {
+      cancelled = true;
+      if (timer !== null) window.clearTimeout(timer);
+    };
+  });
+
+  const chatUnread = $derived.by(() => {
+    if (!payload || payload.list.kind !== 'collab') return 0;
+    const lastRead = appState.chatReadIds[String(payload.list.id)] ?? 0;
+    return payload.messages.filter((m) => Number(m.id) > lastRead).length;
+  });
+
+  function toggleChat(): void {
+    appState.chatOpen = !appState.chatOpen;
+    persistChatOpen(appState.chatOpen);
+  }
+
   function shuffle(): void {
     if (!payload) return;
     const candidates = payload.albums.filter((album) => !album.currentUserCompleted);
@@ -92,7 +134,8 @@
 {:else if loadError}
   <Placeholder title="Could not load list" note={loadError} />
 {:else if payload}
-  <main>
+  {@const showChat = payload.list.kind === 'collab' && payload.permissions.isMember && appState.chatOpen}
+  <main class:collab-layout={showChat}>
     <section class="page-shell list-main">
       <div class="title-row">
         <div class="list-title-line">
@@ -129,6 +172,15 @@
             onclick={() => (shareOpen = !shareOpen)}
           />
         {/if}
+        {#if payload.list.kind === 'collab' && payload.permissions.isMember}
+          <IconButton
+            icon="message"
+            label="Chat"
+            active={appState.chatOpen}
+            badge={chatUnread > 0 ? chatUnread : null}
+            onclick={toggleChat}
+          />
+        {/if}
       </div>
 
       {#if shareOpen}
@@ -157,5 +209,8 @@
         <PeoplePanel payload={payload} onPayloadUpdate={(next) => (payload = next)} />
       {/if}
     </section>
+    {#if showChat}
+      <ChatPanel payload={payload} onPayloadUpdate={(next) => (payload = next)} />
+    {/if}
   </main>
 {/if}

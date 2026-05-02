@@ -24,6 +24,23 @@ function loadThemePreference(): ThemePreference {
   return 'system';
 }
 
+const CHAT_OPEN_KEY = 'albums_chat_open_v1';
+const CHAT_READ_KEY = 'albums_chat_read_v1';
+
+function loadChatOpen(): boolean {
+  return localStorage.getItem(CHAT_OPEN_KEY) !== 'closed';
+}
+
+function loadChatReadIds(): Record<string, number> {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(CHAT_READ_KEY) ?? 'null');
+    if (parsed && typeof parsed === 'object') return parsed as Record<string, number>;
+  } catch {
+    // fall through
+  }
+  return {};
+}
+
 export interface AppState {
   user: User | null;
   lists: ListSummary[];
@@ -36,6 +53,8 @@ export interface AppState {
   error: string;
   settingsOpen: boolean;
   currentListPayload: ListPayload | null;
+  chatOpen: boolean;
+  chatReadIds: Record<string, number>;
 }
 
 export const appState: AppState = $state({
@@ -49,8 +68,18 @@ export const appState: AppState = $state({
   notice: '',
   error: '',
   settingsOpen: false,
-  currentListPayload: null
+  currentListPayload: null,
+  chatOpen: loadChatOpen(),
+  chatReadIds: loadChatReadIds()
 });
+
+export function persistChatOpen(open: boolean): void {
+  localStorage.setItem(CHAT_OPEN_KEY, open ? 'open' : 'closed');
+}
+
+export function persistChatReadIds(): void {
+  localStorage.setItem(CHAT_READ_KEY, JSON.stringify(appState.chatReadIds));
+}
 
 export function persistTheme(theme: ThemePreference): void {
   localStorage.setItem(THEME_KEY, theme);

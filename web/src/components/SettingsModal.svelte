@@ -7,6 +7,7 @@
   import type { ThemePreference } from '$lib/types';
   import IconButton from './IconButton.svelte';
   import OwnerListSettings from './OwnerListSettings.svelte';
+  import InviteNotifications from './InviteNotifications.svelte';
 
   interface Props {
     onClose: () => void;
@@ -98,6 +99,7 @@
       {#if modalError}
         <div class="error-line">{modalError}</div>
       {/if}
+      <InviteNotifications />
       {#if appState.currentListPayload && appState.currentListPayload.permissions.canManage}
         <div>
           <span class="label">List settings</span>
