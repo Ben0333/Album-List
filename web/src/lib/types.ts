@@ -47,6 +47,7 @@ export interface MePayload {
 }
 
 export interface GuestAlbum {
+  id: string;
   title: string;
   artist: string;
   coverUrl: string | null;

@@ -1,6 +1,7 @@
 <script lang="ts">
   import { appState } from '$lib/state.svelte';
   import { navigate } from '$lib/router.svelte';
+  import GuestPage from './GuestPage.svelte';
   import Placeholder from './Placeholder.svelte';
 
   $effect(() => {
@@ -13,8 +14,5 @@
 {#if appState.user}
   <Placeholder title="Loading…" note="Redirecting to your list." />
 {:else}
-  <Placeholder
-    title="Albums"
-    note="Sign in or create an account to start a list. Guest mode comes back in a later port commit."
-  />
+  <GuestPage />
 {/if}

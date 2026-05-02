@@ -1,11 +1,9 @@
 <script lang="ts">
   import { api, ApiError } from '$lib/api';
-  import { appState } from '$lib/state.svelte';
-  import type { ListAlbum, ListPayload } from '$lib/types';
   import Cover from './Cover.svelte';
   import Icon from './Icon.svelte';
 
-  interface Suggestion {
+  export interface Suggestion {
     providerId: string;
     title: string;
     artist: string;
@@ -13,27 +11,19 @@
     coverUrl: string | null;
   }
 
-  interface AlbumDetail {
+  export interface AlbumDetail {
     title: string;
     artist: string;
     coverUrl: string | null;
     tracks: Array<{ title: string }>;
   }
 
-  interface AddResponse {
-    albumId: number;
-    copied?: boolean;
-    ok: boolean;
-    revision: string;
-    album?: ListAlbum;
-  }
-
   interface Props {
-    payload: ListPayload;
-    onPayloadUpdate: (next: ListPayload) => void;
+    enabled?: boolean;
+    onPick: (album: AlbumDetail, suggestion: Suggestion) => Promise<void> | void;
   }
 
-  let { payload, onPayloadUpdate }: Props = $props();
+  let { enabled = true, onPick }: Props = $props();
   let query = $state<string>('');
   let suggestions = $state<Suggestion[]>([]);
   let searching = $state<boolean>(false);
@@ -87,22 +77,10 @@
     adding = true;
     lastError = '';
     try {
-      const lookup = await api.get<{ album: AlbumDetail }>(`/api/albums/lookup/${encodeURIComponent(suggestion.providerId)}`);
-      const result = await api.post<AddResponse>(`/api/lists/${payload.list.id}/albums`, {
-        title: lookup.album.title,
-        artist: lookup.album.artist,
-        coverUrl: lookup.album.coverUrl,
-        tracks: lookup.album.tracks
-      });
-      if (result.copied === false) {
-        appState.notice = 'Already in this list.';
-      }
-      if (result.album) {
-        const albums = payload.albums.some((a) => a.id === result.album!.id)
-          ? payload.albums.map((a) => (a.id === result.album!.id ? result.album! : a))
-          : [...payload.albums, result.album];
-        onPayloadUpdate({ ...payload, albums });
-      }
+      const lookup = await api.get<{ album: AlbumDetail }>(
+        `/api/albums/lookup/${encodeURIComponent(suggestion.providerId)}`
+      );
+      await onPick(lookup.album, suggestion);
       query = '';
       suggestions = [];
       open = false;
@@ -130,7 +108,7 @@
   }
 </script>
 
-{#if payload.permissions.canEdit}
+{#if enabled}
   <div class="search-wrap" data-search-scope="album">
     <label class="search-input">
       <Icon name="plus" />

@@ -1,4 +1,4 @@
-type Json = Record<string, unknown> | unknown[] | string | number | boolean | null;
+type Json = unknown;
 
 export class ApiError extends Error {
   status: number;

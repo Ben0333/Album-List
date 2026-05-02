@@ -6,8 +6,10 @@
   import IconButton from '../components/IconButton.svelte';
   import AlbumRow from '../components/AlbumRow.svelte';
   import AlbumSearch from '../components/AlbumSearch.svelte';
+  import type { AlbumDetail } from '../components/AlbumSearch.svelte';
   import ListSwitcher from '../components/ListSwitcher.svelte';
   import Placeholder from './Placeholder.svelte';
+  import type { ListAlbum } from '$lib/types';
 
   let payload = $state<ListPayload | null>(null);
   let loading = $state<boolean>(true);
@@ -54,6 +56,21 @@
   }
 
   const pathPrefix = $derived(payload ? `/list/${payload.list.id}` : '');
+
+  async function addAlbum(album: AlbumDetail): Promise<void> {
+    if (!payload) return;
+    const result = await api.post<{ albumId: number; copied?: boolean; album?: ListAlbum }>(
+      `/api/lists/${payload.list.id}/albums`,
+      album
+    );
+    if (result.copied === false) appState.notice = 'Already in this list.';
+    if (result.album) {
+      const albums = payload.albums.some((a) => a.id === result.album!.id)
+        ? payload.albums.map((a) => (a.id === result.album!.id ? result.album! : a))
+        : [...payload.albums, result.album];
+      payload = { ...payload, albums };
+    }
+  }
 </script>
 
 {#if loading && !payload}
@@ -76,7 +93,7 @@
         {/if}
       </div>
 
-      <AlbumSearch payload={payload} onPayloadUpdate={(next) => (payload = next)} />
+      <AlbumSearch enabled={payload.permissions.canEdit} onPick={addAlbum} />
 
       <section class="album-stack">
         {#if payload.albums.length}
