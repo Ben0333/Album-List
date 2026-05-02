@@ -6,6 +6,7 @@
   import { refreshMe } from '$lib/me';
   import type { ThemePreference } from '$lib/types';
   import IconButton from './IconButton.svelte';
+  import OwnerListSettings from './OwnerListSettings.svelte';
 
   interface Props {
     onClose: () => void;
@@ -96,6 +97,12 @@
       {/if}
       {#if modalError}
         <div class="error-line">{modalError}</div>
+      {/if}
+      {#if appState.currentListPayload && appState.currentListPayload.permissions.canManage}
+        <div>
+          <span class="label">List settings</span>
+          <OwnerListSettings payload={appState.currentListPayload} />
+        </div>
       {/if}
     </div>
   </section>

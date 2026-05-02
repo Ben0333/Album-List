@@ -1,4 +1,4 @@
-import type { GuestState, InviteSummary, ListSummary, ThemePreference, User } from './types';
+import type { GuestState, InviteSummary, ListPayload, ListSummary, ThemePreference, User } from './types';
 
 const GUEST_KEY = 'albums_guest_v2';
 const OLD_GUEST_KEY = 'albums_guest_v1';
@@ -35,6 +35,7 @@ export interface AppState {
   notice: string;
   error: string;
   settingsOpen: boolean;
+  currentListPayload: ListPayload | null;
 }
 
 export const appState: AppState = $state({
@@ -47,7 +48,8 @@ export const appState: AppState = $state({
   selectedPlatform: 'na',
   notice: '',
   error: '',
-  settingsOpen: false
+  settingsOpen: false,
+  currentListPayload: null
 });
 
 export function persistTheme(theme: ThemePreference): void {

@@ -28,6 +28,7 @@
       .then((data) => {
         if (cancelled) return;
         payload = data;
+        appState.currentListPayload = data;
       })
       .catch((err: unknown) => {
         if (cancelled) return;
@@ -38,7 +39,12 @@
       });
     return () => {
       cancelled = true;
+      appState.currentListPayload = null;
     };
+  });
+
+  $effect(() => {
+    if (payload) appState.currentListPayload = payload;
   });
 
   function shuffle(): void {
