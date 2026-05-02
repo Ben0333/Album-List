@@ -55,6 +55,7 @@ export interface AppState {
   currentListPayload: ListPayload | null;
   chatOpen: boolean;
   chatReadIds: Record<string, number>;
+  listPicker: { title: string; artist: string; coverUrl: string | null } | null;
 }
 
 export const appState: AppState = $state({
@@ -70,7 +71,8 @@ export const appState: AppState = $state({
   settingsOpen: false,
   currentListPayload: null,
   chatOpen: loadChatOpen(),
-  chatReadIds: loadChatReadIds()
+  chatReadIds: loadChatReadIds(),
+  listPicker: null
 });
 
 export function persistChatOpen(open: boolean): void {

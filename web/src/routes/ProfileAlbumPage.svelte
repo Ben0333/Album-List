@@ -97,6 +97,16 @@
           {:else}
             <span class="pill">Not finished</span>
           {/if}
+          {#if appState.user && !ownProfile}
+            <IconButton
+              icon="plus"
+              label="Add to library"
+              className="pill"
+              onclick={() => {
+                appState.listPicker = { title: a.title, artist: a.artist, coverUrl: a.coverUrl };
+              }}
+            />
+          {/if}
         </div>
       </div>
     </section>

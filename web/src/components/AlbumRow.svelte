@@ -37,6 +37,13 @@
   const isCollab = $derived(payload.list.kind === 'collab');
   const canVoteRemove = $derived(isCollab && payload.permissions.isMember);
   const canRemove = $derived(payload.permissions.canEdit || canVoteRemove);
+  const canCopy = $derived(
+    Boolean(
+      appState.user &&
+        payload.list.ownerUserId !== appState.user.id &&
+        !album.currentUserLibrary
+    )
+  );
   const removeLabel: string = $derived.by(() => {
     if (!isCollab) return 'Remove';
     return album.currentUserRemovalVoted
@@ -102,6 +109,16 @@
     <Completion {album} {payload} {onPayloadUpdate} />
     {#if libraryLabel}
       <span class="pill done">{libraryLabel}</span>
+    {/if}
+    {#if canCopy}
+      <IconButton
+        icon="plus"
+        label="Add"
+        className="pill"
+        onclick={() => {
+          appState.listPicker = { title: album.title, artist: album.artist, coverUrl: album.coverUrl };
+        }}
+      />
     {/if}
     {#if payload.permissions.canEdit}
       <IconButton

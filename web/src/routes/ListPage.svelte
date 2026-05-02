@@ -1,6 +1,6 @@
 <script lang="ts">
   import { appState, persistChatOpen } from '$lib/state.svelte';
-  import { router } from '$lib/router.svelte';
+  import { router, navigate } from '$lib/router.svelte';
   import { api, ApiError } from '$lib/api';
   import type { ListAlbum, ListPayload, NotModifiedPayload } from '$lib/types';
   import IconButton from '../components/IconButton.svelte';
@@ -94,6 +94,18 @@
     persistChatOpen(appState.chatOpen);
   }
 
+  async function newCollabList(): Promise<void> {
+    const name = window.prompt('Name for the shared list?');
+    if (!name?.trim()) return;
+    try {
+      const data = await api.post<{ list: ListPayload }>('/api/lists', { kind: 'collab', name: name.trim() });
+      appState.notice = `Created "${data.list.list.name}".`;
+      navigate(`/list/${data.list.list.id}`);
+    } catch (err) {
+      appState.error = err instanceof ApiError ? err.message : (err as Error).message;
+    }
+  }
+
   function shuffle(): void {
     if (!payload) return;
     const candidates = payload.albums.filter((album) => !album.currentUserCompleted);
@@ -155,6 +167,9 @@
             active={appState.settingsOpen}
             onclick={() => (appState.settingsOpen = !appState.settingsOpen)}
           />
+        {/if}
+        {#if appState.user}
+          <IconButton icon="plus" label="New shared list" onclick={newCollabList} />
         {/if}
         {#if payload.permissions.isMember && payload.list.kind === 'collab'}
           <IconButton

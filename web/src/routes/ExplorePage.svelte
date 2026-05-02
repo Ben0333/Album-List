@@ -68,6 +68,14 @@
     appState.notice = `Added “${album.title}” to your guest list.`;
   }
 
+  function openListPicker(album: ExploreAlbum): void {
+    appState.listPicker = {
+      title: album.title,
+      artist: album.artist,
+      coverUrl: album.coverUrl
+    };
+  }
+
   function listSummary(list: PopularList): string {
     const parts = [`${list.albumCount} albums`, `${list.memberCount} member${list.memberCount === 1 ? '' : 's'}`];
     if (list.listenCount) parts.push(`${list.listenCount} listens`);
@@ -94,7 +102,9 @@
         <h1>{album.title}</h1>
         <p>{albumSubtitle(album)}</p>
         <div class="button-row left">
-          {#if !appState.user}
+          {#if appState.user}
+            <IconButton icon="plus" label="Add to library" className="pill" onclick={() => openListPicker(album)} />
+          {:else}
             <IconButton icon="plus" label="Add to guest list" className="pill" onclick={() => addToGuest(album)} />
           {/if}
         </div>
@@ -122,7 +132,9 @@
               <strong>{album.title}</strong>
               <span>{albumSubtitle(album)}</span>
             </button>
-            {#if !appState.user}
+            {#if appState.user}
+              <IconButton icon="plus" label="Add" className="pill" onclick={() => openListPicker(album)} />
+            {:else}
               <IconButton icon="plus" label="Add" className="pill" onclick={() => addToGuest(album)} />
             {/if}
           </div>
