@@ -74,7 +74,8 @@ In dev, run `npm run dev` to start both Vite (port 5173) and the API server
   `ADMIN_TOKEN` or `ADMIN_PASSWORD_HASH`; never expose password hashes, session
   token hashes, share/invite/history tokens, IP hashes, or Cloudflare tokens.
   The admin console static files are served by the admin service only, and the
-  admin server rejects non-localhost Host headers.
+  admin server rejects non-localhost Host headers. The public app returns 404
+  for `/admin` paths so the private admin UI is not served through Cloudflare.
 - Admin database backups are generated with SQLite `VACUUM INTO`, require admin
   auth plus CSRF for browser sessions, stream with no-store cache headers, and
   are logged in `admin_action_log`. Local backup files belong in gitignored

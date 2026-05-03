@@ -3974,6 +3974,11 @@ app.use('/api', (req, res) => {
   res.status(404).json({ error: { message: 'Not found.', status: 404 } });
 });
 
+app.use('/admin', (req, res) => {
+  res.setHeader('Cache-Control', 'no-store');
+  res.status(404).type('text/plain').send('Not found.');
+});
+
 app.get('*', (req, res) => {
   res.sendFile(path.join(publicDir, 'index.html'));
 });
