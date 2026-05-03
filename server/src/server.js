@@ -3527,7 +3527,7 @@ app.post(
 
     const force = req.body?.force === true;
     const currentCoverUrl = safeExternalImageUrl(album.cover_url);
-    const currentStillWorks = !force && currentCoverUrl ? await imageUrlWorks(currentCoverUrl) : false;
+    const currentStillWorks = !force && currentCoverUrl ? true : false;
     const refreshedCoverUrl = currentStillWorks
       ? currentCoverUrl
       : await resolveVerifiedAlbumCover(album.title, album.artist, itunesCountry(req), force ? [currentCoverUrl, req.body?.brokenUrl] : []);
