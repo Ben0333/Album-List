@@ -193,8 +193,29 @@ async function loadSummary() {
       ['Ratings', data.counts.ratings],
       ['Messages', data.counts.messages]
     ];
+    for (const reportStatus of data.bugReportsByStatus || []) {
+      stats.push([`Reports ${reportStatus.status}`, reportStatus.count]);
+    }
     for (const [label, value] of stats) {
       target.append(el('div', { className: 'stat' }, [el('b', { text: value }), el('span', { text: label })]));
+    }
+    if (data.recentSignups?.length) {
+      target.append(
+        el('div', { className: 'stat recent-signups' }, [
+          el('b', { text: 'Recent Signups' }),
+          el(
+            'ul',
+            {},
+            data.recentSignups.map((user) =>
+              el('li', {}, [
+                el('span', { text: user.username }),
+                el('small', { text: formatDate(user.createdAt) }),
+                user.disabledAt ? el('em', { text: 'disabled' }) : null
+              ])
+            )
+          )
+        ])
+      );
     }
   } catch (error) {
     target.append(el('div', { className: 'error', text: error.message }));
@@ -259,10 +280,20 @@ function userRow(user) {
         className: 'danger',
         text: 'Disable',
         onclick: async () => {
-          const reason = window.prompt('Reason for disabling this account') || '';
+          const reason = window.prompt('Reason for disabling this account. A reason is required.');
+          if (reason === null) return;
+          const cleanReason = reason.trim();
+          if (!cleanReason) {
+            window.alert('A disable reason is required.');
+            return;
+          }
+          const confirmed = window.confirm(
+            `Disable ${user.username}? This blocks login, invalidates active sessions, and does not delete any user data.`
+          );
+          if (!confirmed) return;
           await api(`/admin/api/users/${user.id}/disable`, {
             method: 'POST',
-            body: JSON.stringify({ reason })
+            body: JSON.stringify({ reason: cleanReason })
           });
           await refreshAll();
         }

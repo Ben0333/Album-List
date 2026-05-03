@@ -71,7 +71,7 @@ sudo rc-service albums-compose start
 Before enabling the service, make sure production env files are in place:
 
 ```sh
-cd /opt/Album-List
+cd /opt/album-list
 cp .env.example .env
 cp .env.admin.example .env.admin
 cp .env.cloudflare.example .env.cloudflare
@@ -84,18 +84,8 @@ Tunnel token in `.env.cloudflare` if the `cloudflared` Compose service is used.
 Set either `ADMIN_TOKEN` or `ADMIN_PASSWORD_HASH` in `.env.admin`; the private
 admin service listens on host-local `127.0.0.1:3001` and refuses to start
 without admin auth configured. Wrap bcrypt hashes in single quotes because they
-contain `$` characters. `ADMIN_ORIGIN` may be a comma-separated list when the
-same admin tunnel has more than one hostname.
-
-To publish the admin console through a separate Cloudflare Tunnel, keep the
-tunnel credentials in `/opt/album-list/.cloudflared-admin/` and enable the
-`admin-cloudflare` Compose profile in the host `.env`:
-
-```env
-COMPOSE_PROFILES=admin-cloudflare
-```
-
-The admin tunnel should route only the admin hostname to
+contain `$` characters. Access the admin console from your workstation with
+`ssh -N -L 3001:127.0.0.1:3001 turntable`, then open
 `http://127.0.0.1:3001`.
 
 ## Verify
@@ -124,7 +114,7 @@ sudo crontab -l | grep albums-weekly-restart
 Check the Compose project and app health endpoint:
 
 ```sh
-cd /opt/Album-List
+cd /opt/album-list
 docker compose config
 docker compose ps
 curl -fsS http://127.0.0.1:3000/api/health

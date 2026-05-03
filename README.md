@@ -56,9 +56,9 @@ the connector token does not end up in the repository.
 The optional private admin backend runs as a separate `admin` workspace on port
 3001. It has no routes in the public SPA and should stay bound to localhost.
 Docker Compose publishes it as `127.0.0.1:3001:3001`; keep real admin auth
-secrets in `.env.admin` on the host only. A separate profiled
-`cloudflared-admin` service can publish only that private admin service through
-Cloudflare Tunnel.
+secrets in `.env.admin` on the host only. Reach it from another machine with an
+SSH tunnel such as `ssh -N -L 3001:127.0.0.1:3001 turntable`. The admin server
+rejects non-localhost Host headers.
 
 VM autostart and weekly app-container restart units are documented in
 `deploy/README.md`.
@@ -90,8 +90,8 @@ server and set either `ADMIN_TOKEN` or `ADMIN_PASSWORD_HASH`. Password login
 also checks `ADMIN_USERNAME`, which defaults to `admin`. The admin service
 refuses to start without one of those auth values. Do not commit the real
 `.env.admin` file. Wrap bcrypt hashes in single quotes in `.env.admin` because
-they contain `$` characters. `ADMIN_ORIGIN` may be a comma-separated list when
-the same admin tunnel has more than one hostname.
+they contain `$` characters. Keep `ADMIN_ORIGIN` on the localhost origin used by
+the SSH tunnel unless you intentionally add another private local origin.
 
 ## Features
 

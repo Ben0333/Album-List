@@ -163,6 +163,24 @@ function originAllowed(origin, req) {
   }
 }
 
+function localHostFromHeader(hostHeader) {
+  const host = String(hostHeader || '').trim().toLowerCase();
+  if (!host) return '';
+  if (host.startsWith('[')) {
+    const end = host.indexOf(']');
+    return end === -1 ? '' : host.slice(1, end);
+  }
+  return host.split(':')[0];
+}
+
+function requireLocalHost(req, res, next) {
+  const host = localHostFromHeader(req.get('host'));
+  if (!['127.0.0.1', 'localhost', '::1'].includes(host)) {
+    throw httpError(403, 'Admin is only available on localhost.');
+  }
+  next();
+}
+
 function validateRequestOrigin(req, res, next) {
   if (safeMethods.has(req.method)) {
     next();
@@ -401,6 +419,7 @@ app.use(
   })
 );
 app.use(setNoStore);
+app.use(requireLocalHost);
 app.use(validateRequestOrigin);
 app.use(express.json({ limit: '100kb' }));
 
@@ -581,6 +600,7 @@ app.post(
   route((req, res) => {
     const userId = parseId(req.params.id, 'User id');
     const reason = clampText(req.body?.reason, 500);
+    if (!reason) throw httpError(400, 'A disable reason is required.');
     const updated = transaction(() => {
       const user = db.prepare('SELECT id, username, disabled_at, disabled_reason FROM users WHERE id = ?').get(userId);
       if (!user) throw httpError(404, 'User not found.');

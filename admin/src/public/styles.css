@@ -172,6 +172,42 @@ label {
   font-size: 1.55rem;
 }
 
+.recent-signups {
+  grid-column: span 2;
+}
+
+.recent-signups b {
+  font-size: 1rem;
+  margin-bottom: 10px;
+}
+
+.recent-signups ul {
+  display: grid;
+  gap: 8px;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.recent-signups li {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  gap: 8px;
+  align-items: baseline;
+}
+
+.recent-signups span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.recent-signups small,
+.recent-signups em {
+  color: #687386;
+  font-style: normal;
+}
+
 .filters,
 .actions,
 .row-actions {
@@ -303,7 +339,9 @@ th {
   }
 
   .muted,
-  .login-card p {
+  .login-card p,
+  .recent-signups small,
+  .recent-signups em {
     color: #a7afbf;
   }
 }

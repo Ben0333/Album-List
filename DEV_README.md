@@ -73,7 +73,8 @@ In dev, run `npm run dev` to start both Vite (port 5173) and the API server
   workspace and listen on port 3001. Keep them off the public app and require
   `ADMIN_TOKEN` or `ADMIN_PASSWORD_HASH`; never expose password hashes, session
   token hashes, share/invite/history tokens, IP hashes, or Cloudflare tokens.
-  The admin console static files are served by the admin service only.
+  The admin console static files are served by the admin service only, and the
+  admin server rejects non-localhost Host headers.
 - `helmet` sets security headers and CSP. Current CSP allows same-origin
   scripts/connections, inline styles (Vite emits some), and images from
   `self`, `data:`, and `https:`.
