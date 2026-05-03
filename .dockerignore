@@ -8,6 +8,8 @@
 !**/.env.admin.example
 **/data/*.sqlite
 **/data/*.sqlite-*
+backups
+.claude
 **/dist
 DEV_README.md
 README.md

@@ -6,6 +6,8 @@
 !**/.env.admin.example
 **/data/*.sqlite
 **/data/*.sqlite-*
+backups/
+.claude/
 npm-debug.log*
 .DS_Store
 **/.server.pid
