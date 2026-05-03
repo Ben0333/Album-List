@@ -36,7 +36,10 @@ const adminHost = String(process.env.ADMIN_HOST || '127.0.0.1').trim() || '127.0
 const adminToken = String(process.env.ADMIN_TOKEN || '').trim();
 const adminPasswordHash = String(process.env.ADMIN_PASSWORD_HASH || '').trim();
 const adminUsername = String(process.env.ADMIN_USERNAME || 'admin').trim();
-const adminOrigin = String(process.env.ADMIN_ORIGIN || '').trim().replace(/\/+$/, '');
+const adminOrigins = String(process.env.ADMIN_ORIGINS || process.env.ADMIN_ORIGIN || '')
+  .split(',')
+  .map((origin) => origin.trim().replace(/\/+$/, ''))
+  .filter(Boolean);
 const adminCookieName = String(process.env.ADMIN_SESSION_COOKIE_NAME || 'albums_admin_sid').trim() || 'albums_admin_sid';
 const adminSessionDays = parsePositiveInteger('ADMIN_SESSION_DAYS', process.env.ADMIN_SESSION_DAYS, 1, { min: 1, max: 7 });
 const adminCookieSecure = parseBoolean(process.env.ADMIN_COOKIE_SECURE, false);
@@ -151,7 +154,7 @@ function originAllowed(origin, req) {
     const parsedOrigin = new URL(origin).origin;
     return (
       parsedOrigin === requestOrigin(req) ||
-      (adminOrigin && parsedOrigin === adminOrigin) ||
+      adminOrigins.includes(parsedOrigin) ||
       parsedOrigin === `http://127.0.0.1:${adminPort}` ||
       parsedOrigin === `http://localhost:${adminPort}`
     );

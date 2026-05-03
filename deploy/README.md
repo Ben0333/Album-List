@@ -84,7 +84,8 @@ Tunnel token in `.env.cloudflare` if the `cloudflared` Compose service is used.
 Set either `ADMIN_TOKEN` or `ADMIN_PASSWORD_HASH` in `.env.admin`; the private
 admin service listens on host-local `127.0.0.1:3001` and refuses to start
 without admin auth configured. Wrap bcrypt hashes in single quotes because they
-contain `$` characters.
+contain `$` characters. `ADMIN_ORIGIN` may be a comma-separated list when the
+same admin tunnel has more than one hostname.
 
 To publish the admin console through a separate Cloudflare Tunnel, keep the
 tunnel credentials in `/opt/album-list/.cloudflared-admin/` and enable the

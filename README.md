@@ -90,7 +90,8 @@ server and set either `ADMIN_TOKEN` or `ADMIN_PASSWORD_HASH`. Password login
 also checks `ADMIN_USERNAME`, which defaults to `admin`. The admin service
 refuses to start without one of those auth values. Do not commit the real
 `.env.admin` file. Wrap bcrypt hashes in single quotes in `.env.admin` because
-they contain `$` characters.
+they contain `$` characters. `ADMIN_ORIGIN` may be a comma-separated list when
+the same admin tunnel has more than one hostname.
 
 ## Features
 
