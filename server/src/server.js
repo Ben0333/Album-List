@@ -1708,12 +1708,43 @@ async function albumCoverCandidates(title, artist, country = 'US') {
   );
 }
 
+function cachedAlbumCover(title, artist) {
+  const key = albumKey(title, artist);
+  if (!key) return '';
+  const row = db.prepare('SELECT cover_url FROM album_cover_cache WHERE album_key = ?').get(key);
+  const cached = safeExternalImageUrl(row?.cover_url);
+  if (cached) return cached;
+  const metadata = albumMetadata(key);
+  const metadataCover = safeExternalImageUrl(metadata.cover_url);
+  if (metadataCover) return saveAlbumCover(metadata.title || title, metadata.artist || artist, metadataCover, 'album-metadata');
+  return '';
+}
+
+function saveAlbumCover(title, artist, coverUrl, source = '') {
+  const safeCoverUrl = safeExternalImageUrl(coverUrl);
+  const key = albumKey(title, artist);
+  if (!key || !safeCoverUrl) return '';
+  db.prepare(
+    `INSERT INTO album_cover_cache (album_key, title, artist, cover_url, source, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?)
+     ON CONFLICT(album_key) DO UPDATE SET
+       title = excluded.title,
+       artist = excluded.artist,
+       cover_url = excluded.cover_url,
+       source = excluded.source,
+       updated_at = excluded.updated_at`
+  ).run(key, clampText(title, 160), clampText(artist, 160), safeCoverUrl, clampText(source, 80), nowIso());
+  return safeCoverUrl;
+}
+
 async function resolveVerifiedAlbumCover(title, artist, country = 'US', excludedUrls = []) {
   const excluded = new Set(excludedUrls.map(safeExternalImageUrl).filter(Boolean));
+  const cached = cachedAlbumCover(title, artist);
+  if (cached && !excluded.has(cached)) return cached;
   for (const album of await albumCoverCandidates(title, artist, country)) {
     const coverUrl = safeExternalImageUrl(album.coverUrl);
     if (!coverUrl || excluded.has(coverUrl)) continue;
-    if (await imageUrlWorks(coverUrl)) return coverUrl;
+    if (await imageUrlWorks(coverUrl)) return saveAlbumCover(title, artist, coverUrl, album.provider || 'metadata');
   }
   return '';
 }
@@ -2579,6 +2610,7 @@ function cachedExploreCover(slug, albumIndex) {
 function saveExploreCover(slug, albumIndex, album, coverUrl) {
   const safeCoverUrl = safeExternalImageUrl(coverUrl);
   if (!safeCoverUrl) return;
+  saveAlbumCover(album.title || '', album.artist || '', safeCoverUrl, `explore:${slug}`);
   const memoryKey = `${slug}:${albumIndex}`;
   exploreCoverMemoryCache.set(memoryKey, safeCoverUrl);
   db.prepare(
@@ -2613,6 +2645,11 @@ async function resolveExploreCover(slug, albumIndex, album, options = {}) {
   }
   const cached = force ? null : cachedExploreCover(slug, albumIndex);
   if (cached !== null) return cached;
+  const albumCached = force ? '' : cachedAlbumCover(album.title, album.artist);
+  if (albumCached) {
+    saveExploreCover(slug, albumIndex, album, albumCached);
+    return albumCached;
+  }
   const candidates = [];
   const spotifyCover = await spotifyAlbumCover(album.spotifyId);
   if (spotifyCover) candidates.push(spotifyCover);

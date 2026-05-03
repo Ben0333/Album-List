@@ -177,6 +177,15 @@ db.exec(`
     PRIMARY KEY (slug, album_index)
   );
 
+  CREATE TABLE IF NOT EXISTS album_cover_cache (
+    album_key TEXT PRIMARY KEY,
+    title TEXT NOT NULL,
+    artist TEXT NOT NULL DEFAULT '',
+    cover_url TEXT NOT NULL,
+    source TEXT NOT NULL DEFAULT '',
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+  );
+
   CREATE TABLE IF NOT EXISTS admin_action_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     action TEXT NOT NULL CHECK (action IN ('disable', 'enable', 'anonymize', 'report_status', 'database_backup')),
@@ -210,6 +219,7 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_album_completions_user_completed ON album_completions(user_id, completed_at);
   CREATE INDEX IF NOT EXISTS idx_list_albums_album_updated ON list_albums(album_key, updated_at);
   CREATE INDEX IF NOT EXISTS idx_list_invites_invitee ON list_invites(invitee_user_id, status);
+  CREATE INDEX IF NOT EXISTS idx_album_cover_cache_updated ON album_cover_cache(updated_at);
   CREATE UNIQUE INDEX IF NOT EXISTS idx_list_invites_one_pending
     ON list_invites(list_id, invitee_user_id)
     WHERE status = 'pending';
