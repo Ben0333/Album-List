@@ -155,25 +155,33 @@ textarea:focus-visible {
 
 .report-fab {
   position: fixed;
-  right: 20px;
-  bottom: 20px;
+  right: 16px;
+  bottom: 10px;
   z-index: 35;
   display: inline-flex;
   align-items: center;
-  gap: 8px;
-  min-height: 44px;
-  padding: 0 16px;
-  border-color: var(--blue);
-  border-radius: 999px;
-  background: var(--blue);
-  color: #ffffff;
-  font-weight: 750;
-  box-shadow: var(--shadow);
+  min-height: auto;
+  padding: 2px 4px;
+  border-color: transparent;
+  border-radius: 4px;
+  background: transparent;
+  color: color-mix(in srgb, var(--muted) 70%, var(--bg) 30%);
+  font-size: 0.76rem;
+  font-weight: 600;
+  box-shadow: none;
+  opacity: 0.78;
 }
 
 .report-fab:hover:not(:disabled) {
-  background: var(--blue-strong);
-  border-color: var(--blue-strong);
+  background: transparent;
+  border-color: transparent;
+  color: var(--muted);
+  opacity: 1;
+  text-decoration: underline;
+}
+
+.report-fab .icon-svg {
+  display: none;
 }
 
 .icon-button,
@@ -1566,10 +1574,8 @@ label span {
   }
 
   .report-fab {
-    right: 12px;
-    bottom: 12px;
-    min-height: 40px;
-    padding: 0 12px;
+    right: 10px;
+    bottom: 8px;
   }
 
   .page-shell {
