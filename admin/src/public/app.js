@@ -98,7 +98,7 @@ function renderLogin(message = '') {
   clear(root);
   root.className = 'login-shell';
   const form = el('form', { className: 'login-card stack' }, [
-    el('div', {}, [el('h1', { text: 'Albums Admin' }), el('p', { text: 'Private control plane' })]),
+    el('div', {}, [el('h1', { text: 'Turntable Admin' }), el('p', { text: 'Private control plane' })]),
     message ? el('div', { className: 'error', text: message }) : null,
     el('label', {}, [
       'Username',
@@ -153,7 +153,7 @@ function renderConsole() {
   root.className = 'shell';
   root.append(
     el('header', { className: 'topbar' }, [
-      el('div', {}, [el('h1', { text: 'Albums Admin' }), el('div', { className: 'muted', text: 'Private backend controls' })]),
+      el('div', {}, [el('h1', { text: 'Turntable Admin' }), el('div', { className: 'muted', text: 'Private backend controls' })]),
       el('div', { className: 'topbar-actions' }, [
         el('button', {
           className: 'secondary',

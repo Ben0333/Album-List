@@ -45,7 +45,8 @@
 </script>
 
 <main class="page-shell">
-  <h1>Albums</h1>
+  <h1>Turntable</h1>
+  <p class="brand-line">Your album queue, listening diary, and shared record shelf.</p>
   <AlbumSearch onPick={add} />
   {#if appState.guest.albums.length}
     <div class="action-row">
@@ -76,3 +77,11 @@
     {/if}
   </section>
 </main>
+
+<style>
+  .brand-line {
+    color: var(--muted);
+    margin: -8px 0 14px;
+    max-width: 620px;
+  }
+</style>

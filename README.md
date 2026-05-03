@@ -1,4 +1,19 @@
-# Albums to Listen To
+# Turntable
+
+Turntable is a music list website for saving albums you want to hear, tracking
+what you have listened to, rating songs and albums, and sharing lists with
+friends. Use it as a personal album backlog, a listening diary, or a shared
+record-club list where people add albums, chat, and compare ratings.
+
+## What You Can Do
+
+- Save albums you want to listen to later.
+- Mark albums as listened and keep a personal listening history.
+- Rate full albums or individual tracks.
+- Share public or unlisted album lists with other people.
+- Build collaborative lists with friends, invites, roles, and chat.
+- Discover albums from built-in starter collections and public shared lists.
+- Use the site as a guest first, then move your list into an account later.
 
 A small album-list web app with guest lists, username/email/password accounts,
 collaborative lists, share links, listening status, track ratings, album
