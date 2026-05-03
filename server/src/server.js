@@ -575,6 +575,22 @@ function limitAlbumLookup(req) {
   });
 }
 
+function limitCoverRefresh(req, albumId) {
+  const identity = rateLimitIdentity(req);
+  enforceRateLimit(req, 'cover-refresh-user', {
+    limit: 12,
+    windowMs: 60 * 60 * 1000,
+    key: identity,
+    message: 'Cover refreshes are temporarily rate limited. Try again later.'
+  });
+  enforceRateLimit(req, 'cover-refresh-album', {
+    limit: 3,
+    windowMs: 10 * 60 * 1000,
+    key: `${identity}:${albumId}`,
+    message: 'That album cover was refreshed recently. Try again in a few minutes.'
+  });
+}
+
 function limitExploreCoverLookup(req) {
   enforceRateLimit(req, 'explore-cover', {
     limit: 80,
@@ -3501,12 +3517,13 @@ app.post(
   '/api/lists/:id/albums/:albumId/cover/refresh',
   route(async (req, res) => {
     const user = requireUser(req);
-    limitAlbumLookup(req);
-    limitDbWrite(req, 'cover-refresh');
     const list = getListOrThrow(Number(req.params.id));
     assertCanEdit(list, user);
     const album = db.prepare('SELECT * FROM list_albums WHERE id = ? AND list_id = ?').get(Number(req.params.albumId), list.id);
     if (!album) throw httpError(404, 'Album not found.');
+    limitCoverRefresh(req, album.id);
+    limitAlbumLookup(req);
+    limitDbWrite(req, 'cover-refresh');
 
     const force = req.body?.force === true;
     const currentCoverUrl = safeExternalImageUrl(album.cover_url);

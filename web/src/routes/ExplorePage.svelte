@@ -15,12 +15,6 @@
   import Cover from '../components/Cover.svelte';
   import Placeholder from './Placeholder.svelte';
 
-  interface ExploreRandomPayload {
-    slug: string;
-    albumIndex: number;
-    album: ExploreAlbum;
-  }
-
   let indexData = $state<ExploreIndexPayload | null>(null);
   let detailData = $state<ExploreList | null>(null);
   let loading = $state<boolean>(true);
@@ -103,9 +97,6 @@
         navigate(`/explore/${encodeURIComponent(currentSlug)}/album/${nextIndex}`);
         return;
       }
-      const query = currentSlug ? `?slug=${encodeURIComponent(currentSlug)}` : '';
-      const pick = await api.get<ExploreRandomPayload>(`/api/explore/random${query}`);
-      navigate(`/explore/${encodeURIComponent(pick.slug)}/album/${pick.albumIndex}`);
     } catch (err) {
       appState.error = getErrorMessage(err);
     } finally {
@@ -193,9 +184,6 @@
   <main class="page-shell explore-shell">
     <IconButton icon="arrow-left" label="Back" className="text-button back-link" onclick={() => navigate('/')} />
     <h1>Explore</h1>
-    <div class="button-row tight">
-      <IconButton icon="dice" label="Shuffle" className="pill" disabled={shuffleBusy} onclick={() => shuffleExplore()} />
-    </div>
     <section class="explore-grid">
       {#each indexData.lists as list (list.slug)}
         <button class="explore-card" onclick={() => navigate(`/explore/${encodeURIComponent(list.slug)}`)}>

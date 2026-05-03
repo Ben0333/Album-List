@@ -81,22 +81,6 @@
     }
   }
 
-  async function refreshCover(): Promise<void> {
-    if (busy || !payload.permissions.canEdit) return;
-    busy = true;
-    try {
-      const data = await api.post<{ album: ListAlbum }>(
-        `/api/lists/${payload.list.id}/albums/${album.id}/cover/refresh`
-      );
-      const albums = payload.albums.map((a) => (a.id === data.album.id ? data.album : a));
-      onPayloadUpdate({ ...payload, albums });
-      appState.notice = 'Cover refreshed.';
-    } catch (err) {
-      appState.error = getErrorMessage(err);
-    } finally {
-      busy = false;
-    }
-  }
 </script>
 
 <article class="album-item" class:highlight={highlighted} data-album-id={album.id}>
@@ -118,15 +102,6 @@
         onclick={() => {
           appState.listPicker = { title: album.title, artist: album.artist, coverUrl: album.coverUrl };
         }}
-      />
-    {/if}
-    {#if payload.permissions.canEdit}
-      <IconButton
-        icon="refresh"
-        label="Refresh cover"
-        className="icon-button"
-        disabled={busy}
-        onclick={refreshCover}
       />
     {/if}
     {#if canRemove}

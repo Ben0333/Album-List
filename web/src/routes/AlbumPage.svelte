@@ -1,6 +1,7 @@
 <script lang="ts">
   import { router, navigate } from '$lib/router.svelte';
   import { api, getErrorMessage } from '$lib/api';
+  import { appState } from '$lib/state.svelte';
   import type { ListAlbum, ListPayload } from '$lib/types';
   import IconButton from '../components/IconButton.svelte';
   import Cover from '../components/Cover.svelte';
@@ -97,6 +98,25 @@
       albumBusy = false;
     }
   }
+
+  async function refreshCover(): Promise<void> {
+    const current = album;
+    if (!payload || !current || albumBusy || !payload.permissions.canEdit) return;
+    albumBusy = true;
+    albumError = '';
+    try {
+      const data = await api.post<{ ok: boolean; album: ListAlbum; coverUrl: string }>(
+        `/api/lists/${payload.list.id}/albums/${current.id}/cover/refresh`
+      );
+      const albums = payload.albums.map((a) => (a.id === data.album.id ? data.album : a));
+      payload = { ...payload, albums };
+      appState.notice = 'Cover refreshed.';
+    } catch (err) {
+      albumError = getErrorMessage(err);
+    } finally {
+      albumBusy = false;
+    }
+  }
 </script>
 
 {#if loading && !payload}
@@ -129,6 +149,15 @@
             <a class="pill link-pill" href={a.externalUrl} target="_blank" rel="noreferrer">Open</a>
           {/if}
           <Completion album={a} {payload} onPayloadUpdate={(next) => (payload = next)} />
+          {#if payload.permissions.canEdit}
+            <IconButton
+              icon="refresh"
+              label="Refresh cover"
+              className="pill"
+              disabled={albumBusy}
+              onclick={refreshCover}
+            />
+          {/if}
           {#if libraryLabel}
             <span class="pill done">{libraryLabel}</span>
           {/if}
@@ -137,6 +166,9 @@
     </section>
 
     <div class="album-details">
+      {#if albumError && a.tracks.length}
+        <div class="error-line">{albumError}</div>
+      {/if}
       {#if a.tracks.length}
         {#if payload.permissions.canRate && payload.list.showRatings}
           <div class="album-detail-controls">
