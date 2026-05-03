@@ -65,7 +65,7 @@
     albumBusy = true;
     albumError = '';
     try {
-      const data = await api.post<{ ok: boolean; album: ListAlbum }>(
+      const data = await api.put<{ ok: boolean; album: ListAlbum }>(
         `/api/lists/${payload.list.id}/albums/${current.id}/rating`,
         { rating }
       );

@@ -3640,20 +3640,43 @@ app.delete(
     const removingSelf = targetUserId === user.id;
     if (removingSelf) assertCanView(list, user);
     else assertCanManage(list, user);
-    if (targetUserId === list.owner_user_id) throw httpError(400, 'The owner cannot leave without transferring ownership first.');
+    const removingOwner = targetUserId === list.owner_user_id;
+    if (removingOwner && !removingSelf) throw httpError(400, 'The owner cannot be removed by another member.');
     if (!getMember(list.id, targetUserId)) throw httpError(404, 'Member not found.');
 
+    let listDeleted = false;
     transaction(() => {
+      if (removingOwner) {
+        const nextOwner = db
+          .prepare(
+            `SELECT user_id
+             FROM list_members
+             WHERE list_id = ? AND user_id != ?
+             ORDER BY role = 'editor' DESC, joined_at ASC, user_id ASC
+             LIMIT 1`
+          )
+          .get(list.id, targetUserId);
+
+        if (!nextOwner) {
+          db.prepare('DELETE FROM lists WHERE id = ?').run(list.id);
+          listDeleted = true;
+          return;
+        }
+
+        db.prepare('UPDATE lists SET owner_user_id = ?, updated_at = ? WHERE id = ?').run(nextOwner.user_id, nowIso(), list.id);
+        db.prepare('UPDATE list_members SET role = ? WHERE list_id = ? AND user_id = ?').run('owner', list.id, nextOwner.user_id);
+      }
+
       db.prepare('DELETE FROM list_members WHERE list_id = ? AND user_id = ?').run(list.id, targetUserId);
       db.prepare(
         `DELETE FROM list_album_removal_votes
          WHERE user_id = ?
            AND list_album_id IN (SELECT id FROM list_albums WHERE list_id = ?)`
       ).run(targetUserId, list.id);
-      db.prepare('UPDATE lists SET updated_at = ? WHERE id = ?').run(nowIso(), list.id);
+      if (!removingOwner) db.prepare('UPDATE lists SET updated_at = ? WHERE id = ?').run(nowIso(), list.id);
     })();
 
-    const payload = removingSelf ? null : buildListPayload(getListOrThrow(list.id), user);
+    const payload = removingSelf || listDeleted ? null : buildListPayload(getListOrThrow(list.id), user);
     res.json({ ok: true, lists: getUserLists(user.id), list: payload });
   })
 );

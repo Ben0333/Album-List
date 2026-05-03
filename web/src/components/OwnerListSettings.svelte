@@ -6,9 +6,10 @@
 
   interface Props {
     payload: ListPayload;
+    onSaved?: () => void;
   }
 
-  let { payload }: Props = $props();
+  let { payload, onSaved }: Props = $props();
   let name = $state<string>('');
   let description = $state<string>('');
   let visibility = $state<'private' | 'unlisted' | 'public'>('private');
@@ -41,6 +42,7 @@
       });
       appState.currentListPayload = data;
       appState.notice = 'List settings saved.';
+      onSaved?.();
     } catch (err) {
       saveError = getErrorMessage(err);
     } finally {

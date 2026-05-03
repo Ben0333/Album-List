@@ -207,7 +207,7 @@
       {#if appState.currentListPayload && appState.currentListPayload.permissions.canManage}
         <div>
           <span class="label">List settings</span>
-          <OwnerListSettings payload={appState.currentListPayload} />
+          <OwnerListSettings payload={appState.currentListPayload} onSaved={onClose} />
         </div>
       {/if}
     </div>
