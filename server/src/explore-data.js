@@ -9724,10 +9724,215 @@ const rawExploreLists = [
   },
   {
       "slug": "needle-drop-10s",
-      "name": "The Needle Drop 10s",
-      "description": "Albums publicly associated with Anthony Fantano / The Needle Drop 10 out of 10 ratings.",
-      "sourceUrl": "https://theneedledrop.com/1010/",
+      "name": "The Needle Drop 7-10s",
+      "description": "Recent albums from The Needle Drop review tags rated 7/10, 8/10, 9/10, or 10/10.",
+      "sourceUrl": "https://theneedledrop.com/album-reviews/",
       "albums": [
+          [
+              "Hotwire Trip Switch",
+              "Prince Daddy & The Hyena",
+              null
+          ],
+          [
+              "Hauntings",
+              "Richard Barbieri",
+              null
+          ],
+          [
+              "Vol. II",
+              "Angine de Poitrine",
+              null
+          ],
+          [
+              "I Have to Get Hotter",
+              "The Femcels",
+              null
+          ],
+          [
+              "Nothing's About to Happen to Me",
+              "Mitski",
+              null
+          ],
+          [
+              "The Mountain",
+              "Gorillaz",
+              null
+          ],
+          [
+              "SweetFace Killah",
+              "Infinite Coles",
+              null
+          ],
+          [
+              "Ca$ino",
+              "Baby Keem",
+              null
+          ],
+          [
+              "The Fall-Off",
+              "J. Cole",
+              null
+          ],
+          [
+              "GUSTO",
+              "Boko Yout",
+              null
+          ],
+          [
+              "For Melancholy Brunettes (& sad women)",
+              "Japanese Breakfast",
+              2025
+          ],
+          [
+              "MAYHEM",
+              "Lady Gaga",
+              2025
+          ],
+          [
+              "Sinister Grift",
+              "Panda Bear",
+              2025
+          ],
+          [
+              "Middle Spoon",
+              "Cheekface",
+              2025
+          ],
+          [
+              "End of the Middle",
+              "Richard Dawson",
+              2025
+          ],
+          [
+              "Sharon Van Etten & The Attachment Theory",
+              "Sharon Van Etten & The Attachment Theory",
+              2025
+          ],
+          [
+              "Distracted",
+              "Thundercat",
+              null
+          ],
+          [
+              "An Undying Love for a Burning World",
+              "Neurosis",
+              null
+          ],
+          [
+              "U",
+              "underscores",
+              2026
+          ],
+          [
+              "Trying Times",
+              "James Blake",
+              null
+          ],
+          [
+              "Half Blood (BloodLuxe)",
+              "slayr",
+              null
+          ],
+          [
+              "The Pleasure Is Yours",
+              "GENA",
+              null
+          ],
+          [
+              "Love Is Not Enough",
+              "Converge",
+              null
+          ],
+          [
+              "the apple tree under the sea",
+              "hemlocke springs",
+              null
+          ],
+          [
+              "We Mean It, Man!",
+              "Gogol Bordello",
+              null
+          ],
+          [
+              "URGH",
+              "Mandy, Indiana",
+              null
+          ],
+          [
+              "SMILE! :D",
+              "Porter Robinson",
+              2024
+          ],
+          [
+              "Inorganic Rites",
+              "Krallice",
+              2024
+          ],
+          [
+              "The Great Bailout",
+              "Moor Mother",
+              2024
+          ],
+          [
+              "The Collective",
+              "Kim Gordon",
+              2024
+          ],
+          [
+              "Loss of Life",
+              "MGMT",
+              2024
+          ],
+          [
+              "My Days of 58",
+              "Bill Callahan",
+              null
+          ],
+          [
+              "To Whom This May Concern",
+              "Jill Scott",
+              null
+          ],
+          [
+              "My Ghosts Go Ghost",
+              "By Storm",
+              null
+          ],
+          [
+              "EUSEXUA Afterglow",
+              "FKA twigs",
+              null
+          ],
+          [
+              "Fairyland Codex",
+              "Tropical Fuck Storm",
+              null
+          ],
+          [
+              "Magic, Alive!",
+              "McKinley Dixon",
+              null
+          ],
+          [
+              "Only Dust Remains",
+              "Backxwash",
+              null
+          ],
+          [
+              "Revengeseekerz",
+              "Jane Remover",
+              2025
+          ],
+          [
+              "Goldstar",
+              "Imperial Triumphant",
+              2025
+          ],
+          [
+              "GNX",
+              "Kendrick Lamar",
+              2024
+          ],
           [
               "The Money Store",
               "Death Grips",
@@ -9860,79 +10065,6 @@ const rawExploreLists = [
               "Currents",
               "Tame Impala",
               2015
-          ]
-      ]
-  },
-  {
-      "slug": "artist-picks-baker-dozen-sampler",
-      "name": "Artist Picks Sampler",
-      "description": "A small gateway inspired by artist-curated favorite-record features like The Quietus Baker's Dozen.",
-      "sourceUrl": "https://thequietus.com/columns/interviews/bakers-dozen/",
-      "albums": [
-          [
-              "Hounds of Love",
-              "Kate Bush",
-              1985
-          ],
-          [
-              "Low",
-              "David Bowie",
-              1977
-          ],
-          [
-              "Blue",
-              "Joni Mitchell",
-              1971
-          ],
-          [
-              "Music for 18 Musicians",
-              "Steve Reich",
-              1978
-          ],
-          [
-              "Remain in Light",
-              "Talking Heads",
-              1980
-          ],
-          [
-              "The Velvet Underground & Nico",
-              "The Velvet Underground & Nico",
-              1967
-          ],
-          [
-              "Nina Simone in Concert",
-              "Nina Simone",
-              1964
-          ],
-          [
-              "3 Feet High and Rising",
-              "De La Soul",
-              1989
-          ],
-          [
-              "Mezzanine",
-              "Massive Attack",
-              1998
-          ],
-          [
-              "Vespertine",
-              "Bj?rk",
-              2001
-          ],
-          [
-              "Maggot Brain",
-              "Funkadelic",
-              1971
-          ],
-          [
-              "Dummy",
-              "Portishead",
-              1994
-          ],
-          [
-              "Endtroducing.....",
-              "DJ Shadow",
-              1996
           ]
       ]
   }

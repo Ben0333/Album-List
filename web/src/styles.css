@@ -67,13 +67,15 @@ body {
 
 button,
 input,
-select {
+select,
+textarea {
   font: inherit;
 }
 
 button,
 input,
-select {
+select,
+textarea {
   border: 1px solid var(--line);
   border-radius: var(--radius);
 }
@@ -98,7 +100,8 @@ button:disabled {
 
 button:hover:not(:disabled),
 select:hover,
-input:focus {
+input:focus,
+textarea:focus {
   border-color: var(--blue);
 }
 
@@ -108,13 +111,15 @@ button:active:not(:disabled) {
 
 button:focus-visible,
 input:focus-visible,
-select:focus-visible {
+select:focus-visible,
+textarea:focus-visible {
   outline: 3px solid color-mix(in srgb, var(--blue) 42%, transparent);
   outline-offset: 2px;
 }
 
 [data-theme="retro"] button,
 [data-theme="retro"] input,
+[data-theme="retro"] textarea,
 [data-theme="retro"] select,
 [data-theme="retro"] .album-item,
 [data-theme="retro"] .settings-modal,
@@ -139,6 +144,29 @@ select:focus-visible {
   display: flex;
   align-items: center;
   gap: 8px;
+}
+
+.report-fab {
+  position: fixed;
+  right: 20px;
+  bottom: 20px;
+  z-index: 35;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 44px;
+  padding: 0 16px;
+  border-color: var(--blue);
+  border-radius: 999px;
+  background: var(--blue);
+  color: #ffffff;
+  font-weight: 750;
+  box-shadow: var(--shadow);
+}
+
+.report-fab:hover:not(:disabled) {
+  background: var(--blue-strong);
+  border-color: var(--blue-strong);
 }
 
 .icon-button,
@@ -926,6 +954,43 @@ h1 {
   background: var(--panel);
 }
 
+.report-form {
+  display: grid;
+  gap: 12px;
+}
+
+.report-form textarea {
+  width: 100%;
+  min-height: 150px;
+  resize: vertical;
+  padding: 10px 11px;
+  background: var(--panel);
+  color: var(--text);
+}
+
+.report-submit.icon-text-button {
+  width: auto;
+  min-width: 132px;
+}
+
+.report-submit.icon-text-button .button-label,
+.report-fab span {
+  position: static;
+  width: auto;
+  height: auto;
+  overflow: visible;
+  clip: auto;
+  white-space: nowrap;
+}
+
+.report-honeypot {
+  position: absolute;
+  left: -10000px;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+}
+
 .share-head {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
@@ -1486,6 +1551,13 @@ label span {
   .utility-bar {
     top: 12px;
     right: 12px;
+  }
+
+  .report-fab {
+    right: 12px;
+    bottom: 12px;
+    min-height: 40px;
+    padding: 0 12px;
   }
 
   .page-shell {

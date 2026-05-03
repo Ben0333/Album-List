@@ -52,6 +52,7 @@ export interface AppState {
   notice: string;
   error: string;
   settingsOpen: boolean;
+  reportOpen: boolean;
   currentListPayload: ListPayload | null;
   chatOpen: boolean;
   chatReadIds: Record<string, number>;
@@ -70,6 +71,7 @@ export const appState: AppState = $state({
   notice: '',
   error: '',
   settingsOpen: false,
+  reportOpen: false,
   currentListPayload: null,
   chatOpen: loadChatOpen(),
   chatReadIds: loadChatReadIds(),

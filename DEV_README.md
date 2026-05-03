@@ -100,6 +100,7 @@ Important tables:
 - `user_album_activity`: profile/history activity that survives list entry deletion.
 - `list_album_removal_votes`: collaborative removal voting.
 - `list_messages`: collaborative list chat.
+- `bug_reports`: guest/account report text with spam-control metadata.
 - `track_ratings`: reusable user ratings by normalized `album_key` and `track_key`.
 - `album_average_opt_in`: user-level opt-in/out for aggregate album averages.
 - `explore_album_covers`: persistent on-demand cache for explore cover URLs.
@@ -143,6 +144,7 @@ Useful flows:
 - `PUT /api/me/albums/:albumKey/ratings/:trackKey` — own-profile rating edits
 - `GET /api/users/:username`
 - `GET /api/users?q=` — username/email search
+- `POST /api/reports` — guest/account bug reports with rate limiting
 - `GET /api/history/:token`
 - `GET /api/explore` and `/api/explore/:slug` and `/api/explore/:slug/covers`
 - `GET /api/recommendations`
@@ -171,6 +173,8 @@ Maintain:
 - own-profile album detail routes let the signed-in user edit their existing ratings in place
 - profile rated albums sort fully listened above unfinished
 - keep `/explore` as usable list content, not a marketing page
+- Discover/Explore album rows should surface current-user listened status when
+  the viewer is logged in.
 - adding albums from explore/shared views opens the list picker; existing destinations show a checkmark; clicking a checked list removes the album (or votes for collab)
 - guests adding from Explore add directly to the local guest list with duplicate protection
 - recommendations backend exists but is not surfaced in the UI; do not re-add a Recommended block to `/explore`

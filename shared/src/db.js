@@ -123,6 +123,18 @@ db.exec(`
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
   );
 
+  CREATE TABLE IF NOT EXISTS bug_reports (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    body TEXT NOT NULL,
+    path TEXT NOT NULL DEFAULT '',
+    user_agent TEXT NOT NULL DEFAULT '',
+    ip_hash TEXT NOT NULL DEFAULT '',
+    body_hash TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'reviewing', 'closed', 'spam')),
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+  );
+
   CREATE TABLE IF NOT EXISTS track_ratings (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -186,6 +198,9 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_completions_album ON album_completions(list_album_id);
   CREATE INDEX IF NOT EXISTS idx_removal_votes_album ON list_album_removal_votes(list_album_id);
   CREATE INDEX IF NOT EXISTS idx_list_messages_list ON list_messages(list_id, created_at);
+  CREATE INDEX IF NOT EXISTS idx_bug_reports_created ON bug_reports(created_at);
+  CREATE INDEX IF NOT EXISTS idx_bug_reports_status ON bug_reports(status, created_at);
+  CREATE INDEX IF NOT EXISTS idx_bug_reports_duplicate ON bug_reports(body_hash, user_id, ip_hash, created_at);
   CREATE INDEX IF NOT EXISTS idx_track_ratings_album ON track_ratings(album_key);
   CREATE INDEX IF NOT EXISTS idx_track_ratings_album_track ON track_ratings(album_key, track_key);
   CREATE INDEX IF NOT EXISTS idx_track_ratings_user_album ON track_ratings(user_id, album_key);

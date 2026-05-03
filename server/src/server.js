@@ -513,6 +513,19 @@ function limitInviteSending(req) {
   });
 }
 
+function limitBugReport(req) {
+  enforceRateLimit(req, 'bug-report-burst', {
+    limit: 3,
+    windowMs: 10 * 60 * 1000,
+    message: 'Bug reports are temporarily rate limited. Try again later.'
+  });
+  enforceRateLimit(req, 'bug-report-day', {
+    limit: 12,
+    windowMs: 24 * 60 * 60 * 1000,
+    message: 'Bug reports are temporarily rate limited. Try again later.'
+  });
+}
+
 function limitDbWrite(req, scope = 'db-write') {
   enforceRateLimit(req, scope, {
     limit: 180,
@@ -2379,19 +2392,63 @@ function exploreListBySlug(slug) {
   return exploreLists.find((item) => item.slug === slug);
 }
 
-function exploreListWithCachedCovers(list) {
+function exploreAlbumStatuses(user) {
+  if (!user) return new Map();
+  const statuses = new Map();
+  for (const row of db
+    .prepare(
+      `SELECT album_key
+       FROM user_album_activity
+       WHERE user_id = ? AND completed_at IS NOT NULL
+       UNION
+       SELECT la.album_key
+       FROM album_completions ac
+       JOIN list_albums la ON la.id = ac.list_album_id
+       WHERE ac.user_id = ?`
+    )
+    .all(user.id, user.id)) {
+    statuses.set(row.album_key, { completed: true, average: null, ratingCount: 0 });
+  }
+
+  for (const row of db
+    .prepare(
+      `SELECT album_key, ROUND(AVG(rating), 1) AS average, COUNT(*) AS rating_count
+       FROM track_ratings
+       WHERE user_id = ? AND include_in_average = 1
+       GROUP BY album_key`
+    )
+    .all(user.id)) {
+    const current = statuses.get(row.album_key) || { completed: false, average: null, ratingCount: 0 };
+    current.average = row.average === null || row.average === undefined ? null : Number(row.average);
+    current.ratingCount = row.rating_count || 0;
+    statuses.set(row.album_key, current);
+  }
+
+  return statuses;
+}
+
+function exploreListWithCachedCovers(list, user = null) {
   const cached = new Map(
     db
       .prepare('SELECT album_index, cover_url FROM explore_album_covers WHERE slug = ?')
       .all(list.slug)
       .map((row) => [row.album_index, safeExternalImageUrl(row.cover_url)])
   );
+  const statuses = exploreAlbumStatuses(user);
   return {
     ...list,
-    albums: list.albums.map((album, index) => ({
-      ...album,
-      coverUrl: safeExternalImageUrl(album.coverUrl) || safeExternalImageUrl(cached.get(index)) || ''
-    }))
+    albums: list.albums.map((album, index) => {
+      const key = albumKey(album.title, album.artist);
+      const status = statuses.get(key);
+      return {
+        ...album,
+        albumKey: key,
+        coverUrl: safeExternalImageUrl(album.coverUrl) || safeExternalImageUrl(cached.get(index)) || '',
+        currentUserCompleted: Boolean(status?.completed),
+        currentUserRatingAverage: status?.average ?? null,
+        currentUserRatingCount: status?.ratingCount ?? 0
+      };
+    })
   };
 }
 
@@ -2639,12 +2696,25 @@ app.get('/api/explore', (req, res) => {
 });
 
 app.get(
+  '/api/explore/random',
+  route((req, res) => {
+    const source = req.query.slug ? exploreListBySlug(String(req.query.slug)) : exploreLists[Math.floor(Math.random() * exploreLists.length)];
+    if (!source) throw httpError(404, 'Explore list not found.');
+    if (!source.albums.length) throw httpError(404, 'Explore list has no albums.');
+    const albumIndex = Math.floor(Math.random() * source.albums.length);
+    res.setHeader('Cache-Control', 'no-store');
+    res.json({ slug: source.slug, albumIndex, album: source.albums[albumIndex] });
+  })
+);
+
+app.get(
   '/api/explore/:slug',
   route((req, res) => {
     const list = exploreListBySlug(req.params.slug);
     if (!list) throw httpError(404, 'Explore list not found.');
-    cachePublic(res, 120, 600);
-    res.json({ list: exploreListWithCachedCovers(list) });
+    if (req.user) res.setHeader('Cache-Control', 'private, no-cache');
+    else cachePublic(res, 120, 600);
+    res.json({ list: exploreListWithCachedCovers(list, req.user) });
   })
 );
 
@@ -2973,6 +3043,52 @@ app.get(
 );
 
 app.post(
+  '/api/reports',
+  route((req, res) => {
+    limitBugReport(req);
+    const user = req.user || null;
+    const honeypot = clampText(req.body?.website, 200);
+    if (honeypot) throw httpError(400, 'Report could not be submitted.');
+
+    const openedAt = Number(req.body?.openedAt || 0);
+    if (openedAt && Date.now() - openedAt < 1500) throw httpError(429, 'Report could not be submitted yet.');
+
+    const body = clampText(req.body?.body, 2000);
+    if (body.length < 10) throw httpError(400, 'Tell us a little more about the bug.');
+    if (body.split(/\s+/).filter(Boolean).length < 3) throw httpError(400, 'Tell us a little more about the bug.');
+
+    const urlCount = (body.match(/https?:\/\/|www\./gi) || []).length;
+    if (urlCount > 2) throw httpError(400, 'Bug reports can include at most two links.');
+
+    const path = clampText(req.body?.path, 300);
+    const safePath = path.startsWith('/') && !path.startsWith('//') ? path : '';
+    const ipHash = hashToken(clientIp(req));
+    const bodyHash = hashToken(normalizeText(body));
+    const cutoff = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+    const duplicate = db
+      .prepare(
+        `SELECT id
+         FROM bug_reports
+         WHERE body_hash = ?
+           AND created_at >= ?
+           AND (ip_hash = ? OR (? IS NOT NULL AND user_id = ?))
+         LIMIT 1`
+      )
+      .get(bodyHash, cutoff, ipHash, user?.id ?? null, user?.id ?? null);
+    if (duplicate) throw httpError(429, 'This report was already submitted recently.');
+
+    const info = db
+      .prepare(
+        `INSERT INTO bug_reports (user_id, body, path, user_agent, ip_hash, body_hash, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`
+      )
+      .run(user?.id ?? null, body, safePath, clampText(req.get('user-agent'), 500), ipHash, bodyHash, nowIso());
+
+    res.status(201).json({ ok: true, id: Number(info.lastInsertRowid) });
+  })
+);
+
+app.post(
   '/api/lists',
   route((req, res) => {
     const user = requireUser(req);
@@ -2984,7 +3100,7 @@ app.post(
     const kind = req.body?.kind === 'collab' ? 'collab' : null;
     if (!kind) throw httpError(400, 'Only collaborative lists can be created manually.');
     const listId = createList(user.id, 'collab', req.body?.name || 'Shared Albums');
-    res.status(201).json({ list: buildListPayload(getListOrThrow(listId), user) });
+    res.status(201).json({ list: buildListPayload(getListOrThrow(listId), user), lists: getUserLists(user.id) });
   })
 );
 

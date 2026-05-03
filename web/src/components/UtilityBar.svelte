@@ -8,6 +8,16 @@
 
   const onExploreClick = () => navigate(router.current.type === 'explore' ? '/' : '/explore');
 
+  function goHome(): void {
+    const personal = appState.lists.find((list) => list.kind === 'personal') ?? appState.lists[0];
+    navigate(personal ? `/list/${personal.id}` : '/');
+  }
+
+  function isHomeActive(): boolean {
+    const personal = appState.lists.find((list) => list.kind === 'personal') ?? appState.lists[0];
+    return router.current.type === 'home' || (router.current.type === 'list' && personal?.id === router.current.id);
+  }
+
   async function cycleTheme(): Promise<void> {
     const next = nextTheme(appState.themePreference);
     appState.themePreference = next;
@@ -31,6 +41,7 @@
     className="icon-button"
     onclick={cycleTheme}
   />
+  <IconButton icon="home" label="Home" active={isHomeActive()} onclick={goHome} />
   <IconButton
     icon={router.current.type === 'explore' ? 'list' : 'compass'}
     label={router.current.type === 'explore' ? 'My lists' : 'Explore'}

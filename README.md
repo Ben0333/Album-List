@@ -81,6 +81,8 @@ unsafe.
   lists.
 - Collaborative list owners can invite accounts by username/email; invitees see
   in-app notifications and can accept or decline.
+- Users and guests can submit bug reports from the floating report button;
+  reports are rate limited and stored in SQLite for follow-up.
 - Share opens an access panel: copy link gives view-only access, while
   searched/invited users can become members.
 - Collaborative lists have a closeable member chat panel with unread counts and
@@ -96,7 +98,7 @@ unsafe.
   albums can refresh their cover from the metadata APIs.
 - Explore lists at `/explore` include popular public shared lists, a
   1,088-album 1001 Albums Generator snapshot, Rolling Stone 500, Needle Drop
-  10s, famous band essentials, artist-pick samplers, and other starter lists.
+  7-10s, famous band essentials, and other starter lists.
 - Shuffle picks an unlistened album when possible, scrolls to it, and
   highlights it.
 - Albums are added by clicking a metadata search result. Covers and track lists

@@ -15,10 +15,17 @@
   import Cover from '../components/Cover.svelte';
   import Placeholder from './Placeholder.svelte';
 
+  interface ExploreRandomPayload {
+    slug: string;
+    albumIndex: number;
+    album: ExploreAlbum;
+  }
+
   let indexData = $state<ExploreIndexPayload | null>(null);
   let detailData = $state<ExploreList | null>(null);
   let loading = $state<boolean>(true);
   let loadError = $state<string>('');
+  let shuffleBusy = $state<boolean>(false);
 
   $effect(() => {
     const route = router.current;
@@ -58,6 +65,12 @@
     return album.releaseYear ? `${artist} - ${album.releaseYear}` : artist;
   }
 
+  function albumStatus(album: ExploreAlbum): string {
+    if (album.currentUserCompleted) return 'Listened';
+    if (album.currentUserRatingCount) return `Your ${album.currentUserRatingAverage}/10`;
+    return '';
+  }
+
   function addToGuest(album: ExploreAlbum): void {
     addGuestAlbum({
       title: album.title,
@@ -80,6 +93,24 @@
     const parts = [`${list.albumCount} albums`, `${list.memberCount} member${list.memberCount === 1 ? '' : 's'}`];
     if (list.listenCount) parts.push(`${list.listenCount} listens`);
     return parts.join(' • ');
+  }
+  async function shuffleExplore(currentSlug?: string): Promise<void> {
+    if (shuffleBusy) return;
+    shuffleBusy = true;
+    try {
+      if (currentSlug && detailData?.slug === currentSlug && detailData.albums.length) {
+        const nextIndex = Math.floor(Math.random() * detailData.albums.length);
+        navigate(`/explore/${encodeURIComponent(currentSlug)}/album/${nextIndex}`);
+        return;
+      }
+      const query = currentSlug ? `?slug=${encodeURIComponent(currentSlug)}` : '';
+      const pick = await api.get<ExploreRandomPayload>(`/api/explore/random${query}`);
+      navigate(`/explore/${encodeURIComponent(pick.slug)}/album/${pick.albumIndex}`);
+    } catch (err) {
+      appState.error = getErrorMessage(err);
+    } finally {
+      shuffleBusy = false;
+    }
   }
 </script>
 
@@ -107,6 +138,9 @@
           {:else}
             <IconButton icon="plus" label="Add to guest list" className="pill" onclick={() => addToGuest(album)} />
           {/if}
+          {#if albumStatus(album)}
+            <span class="pill done">{albumStatus(album)}</span>
+          {/if}
         </div>
       </div>
     </section>
@@ -118,9 +152,19 @@
     <section class="explore-hero">
       <h1>{detailData.name}</h1>
       <p>{detailData.description}</p>
+      <div class="button-row tight">
+        <IconButton
+          icon="dice"
+          label="Shuffle"
+          className="pill"
+          disabled={shuffleBusy}
+          onclick={() => shuffleExplore(detailData!.slug)}
+        />
+      </div>
     </section>
     <section class="album-stack">
       {#each detailData.albums as album, index (`${detailData.slug}:${index}:${album.title}`)}
+        {@const status = albumStatus(album)}
         <article class="album-item">
           <div class="album-line">
             <div class="rank-number">{index + 1}</div>
@@ -132,6 +176,9 @@
               <strong>{album.title}</strong>
               <span>{albumSubtitle(album)}</span>
             </button>
+            {#if status}
+              <span class="pill done">{status}</span>
+            {/if}
             {#if appState.user}
               <IconButton icon="plus" label="Add" className="pill" onclick={() => openListPicker(album)} />
             {:else}
@@ -146,6 +193,9 @@
   <main class="page-shell explore-shell">
     <IconButton icon="arrow-left" label="Back" className="text-button back-link" onclick={() => navigate('/')} />
     <h1>Explore</h1>
+    <div class="button-row tight">
+      <IconButton icon="dice" label="Shuffle" className="pill" disabled={shuffleBusy} onclick={() => shuffleExplore()} />
+    </div>
     <section class="explore-grid">
       {#each indexData.lists as list (list.slug)}
         <button class="explore-card" onclick={() => navigate(`/explore/${encodeURIComponent(list.slug)}`)}>

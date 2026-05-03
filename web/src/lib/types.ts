@@ -208,11 +208,15 @@ export interface ExploreListSummary {
 }
 
 export interface ExploreAlbum {
+  albumKey?: string;
   title: string;
   artist: string;
   releaseYear: number | null;
   coverUrl: string | null;
   spotifyAlbumId?: string | null;
+  currentUserCompleted?: boolean;
+  currentUserRatingAverage?: number | null;
+  currentUserRatingCount?: number;
 }
 
 export interface ExploreList extends ExploreListSummary {

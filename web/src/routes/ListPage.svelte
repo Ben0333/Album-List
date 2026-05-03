@@ -2,7 +2,7 @@
   import { appState, persistChatOpen } from '$lib/state.svelte';
   import { router, navigate } from '$lib/router.svelte';
   import { api, getErrorMessage } from '$lib/api';
-  import type { ListAlbum, ListPayload, NotModifiedPayload } from '$lib/types';
+  import type { ListAlbum, ListPayload, ListSummary, NotModifiedPayload } from '$lib/types';
   import IconButton from '../components/IconButton.svelte';
   import AlbumRow from '../components/AlbumRow.svelte';
   import AlbumSearch from '../components/AlbumSearch.svelte';
@@ -97,7 +97,11 @@
     const name = window.prompt('Name for the shared list?');
     if (!name?.trim()) return;
     try {
-      const data = await api.post<{ list: ListPayload }>('/api/lists', { kind: 'collab', name: name.trim() });
+      const data = await api.post<{ list: ListPayload; lists: ListSummary[] }>('/api/lists', {
+        kind: 'collab',
+        name: name.trim()
+      });
+      appState.lists = data.lists;
       appState.notice = `Created "${data.list.list.name}".`;
       navigate(`/list/${data.list.list.id}`);
     } catch (err) {

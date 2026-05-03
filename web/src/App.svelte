@@ -6,8 +6,10 @@
   import { refreshMe } from '$lib/me';
   import { navigate } from '$lib/router.svelte';
   import UtilityBar from './components/UtilityBar.svelte';
+  import Icon from './components/Icon.svelte';
   import ToastNotice from './components/ToastNotice.svelte';
   import SettingsModal from './components/SettingsModal.svelte';
+  import ReportModal from './components/ReportModal.svelte';
   import ListPickerModal from './components/ListPickerModal.svelte';
   import AvatarCropModal from './components/AvatarCropModal.svelte';
   import Login from './routes/Login.svelte';
@@ -54,6 +56,10 @@
 
 <div class="app-shell" onclickcapture={onAppClick} role="presentation">
   <UtilityBar />
+  <button class="report-fab" type="button" onclick={() => (appState.reportOpen = true)}>
+    <Icon name="flag" />
+    <span>Report bug</span>
+  </button>
   {#if appState.notice}
     <ToastNotice message={appState.notice} onDismiss={() => (appState.notice = '')} />
   {/if}
@@ -95,6 +101,9 @@
   {/if}
   {#if appState.settingsOpen}
     <SettingsModal onClose={() => (appState.settingsOpen = false)} />
+  {/if}
+  {#if appState.reportOpen}
+    <ReportModal onClose={() => (appState.reportOpen = false)} />
   {/if}
   {#if appState.listPicker}
     <ListPickerModal onClose={() => (appState.listPicker = null)} />
