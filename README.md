@@ -40,6 +40,7 @@ npm start            # serves built SPA + API at http://localhost:3000
 
 ```sh
 cp .env.example .env   # edit for production
+cp .env.cloudflare.example .env.cloudflare   # production Cloudflare Tunnel token
 docker compose up --build
 ```
 
@@ -47,6 +48,10 @@ The compose file mounts `./data` to `/data` inside the container so the SQLite
 database persists across rebuilds. The image exposes port 3000 and includes a
 healthcheck against `/api/health`. The base image is `node:22-alpine` and
 builds for `linux/amd64` and `linux/arm64`.
+
+The optional `cloudflared` service publishes the app through a Cloudflare
+Tunnel. It reads `TUNNEL_TOKEN` from `.env.cloudflare`, which is gitignored so
+the connector token does not end up in the repository.
 
 ## Configuration
 
@@ -122,11 +127,13 @@ node:sqlite in WAL mode (no native npm packages required).
 
 Before making it public:
 
-- Put the app behind HTTPS (Caddy, nginx, Cloudflare tunnel, etc.).
+- Put the app behind HTTPS (Caddy, nginx, Cloudflare Tunnel, etc.).
 - Set `APP_ORIGIN` to the public origin.
 - Set `COOKIE_SECURE=true` and `TRUST_PROXY=true`.
 - Set `DATABASE_PATH` to a persistent disk path (the Docker image defaults to
   `/data/albums.sqlite`, mounted as a volume in `docker-compose.yml`).
+- If using the Compose `cloudflared` service, keep the real tunnel token in
+  `.env.cloudflare` on the server only.
 - Keep the SQLite database backed up.
 - Check `GET /api/health` from the load balancer or uptime monitor.
 - Run `npm run check` and `npm run audit` before deploying.

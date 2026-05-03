@@ -2,6 +2,7 @@
 **/.env
 **/.env.*
 !**/.env.example
+!**/.env.cloudflare.example
 **/data/*.sqlite
 **/data/*.sqlite-*
 npm-debug.log*
