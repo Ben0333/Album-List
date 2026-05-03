@@ -86,7 +86,9 @@ admin service listens on host-local `127.0.0.1:3001` and refuses to start
 without admin auth configured. Wrap bcrypt hashes in single quotes because they
 contain `$` characters. Access the admin console from your workstation with
 `ssh -N -L 3001:127.0.0.1:3001 turntable`, then open
-`http://127.0.0.1:3001`.
+`http://127.0.0.1:3001`. Use the admin backup button through that SSH tunnel to
+download SQLite backup files, then store them outside Git, for example under
+the repo-local `backups/` directory.
 
 ## Verify
 

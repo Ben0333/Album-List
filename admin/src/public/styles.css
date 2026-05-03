@@ -123,6 +123,13 @@ label {
   margin-bottom: 22px;
 }
 
+.topbar-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  justify-content: flex-end;
+}
+
 .grid {
   display: grid;
   gap: 16px;
@@ -300,6 +307,10 @@ th {
   .topbar {
     align-items: flex-start;
     flex-direction: column;
+  }
+
+  .topbar-actions {
+    justify-content: flex-start;
   }
 }
 

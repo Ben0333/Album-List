@@ -179,7 +179,7 @@ db.exec(`
 
   CREATE TABLE IF NOT EXISTS admin_action_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    action TEXT NOT NULL CHECK (action IN ('disable', 'enable', 'anonymize')),
+    action TEXT NOT NULL CHECK (action IN ('disable', 'enable', 'anonymize', 'report_status', 'database_backup')),
     user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
     previous_username TEXT NOT NULL DEFAULT '',
     new_username TEXT NOT NULL DEFAULT '',
@@ -260,6 +260,30 @@ if (inviteTable?.sql?.includes('UNIQUE (list_id, invitee_user_id, status)')) {
     CREATE UNIQUE INDEX IF NOT EXISTS idx_list_invites_one_pending
       ON list_invites(list_id, invitee_user_id)
       WHERE status = 'pending';
+  `);
+}
+
+const adminActionLogTable = db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'admin_action_log'").get();
+if (adminActionLogTable?.sql?.includes("action IN ('disable', 'enable', 'anonymize')")) {
+  db.exec(`
+    PRAGMA foreign_keys = OFF;
+    ALTER TABLE admin_action_log RENAME TO admin_action_log_old;
+    CREATE TABLE admin_action_log (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      action TEXT NOT NULL CHECK (action IN ('disable', 'enable', 'anonymize', 'report_status', 'database_backup')),
+      user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+      previous_username TEXT NOT NULL DEFAULT '',
+      new_username TEXT NOT NULL DEFAULT '',
+      details TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+    INSERT INTO admin_action_log (id, action, user_id, previous_username, new_username, details, created_at)
+      SELECT id, action, user_id, previous_username, new_username, details, created_at
+      FROM admin_action_log_old;
+    DROP TABLE admin_action_log_old;
+    PRAGMA foreign_keys = ON;
+    CREATE INDEX IF NOT EXISTS idx_admin_action_log_created ON admin_action_log(created_at);
+    CREATE INDEX IF NOT EXISTS idx_admin_action_log_user ON admin_action_log(user_id, created_at);
   `);
 }
 

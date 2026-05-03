@@ -75,6 +75,10 @@ In dev, run `npm run dev` to start both Vite (port 5173) and the API server
   token hashes, share/invite/history tokens, IP hashes, or Cloudflare tokens.
   The admin console static files are served by the admin service only, and the
   admin server rejects non-localhost Host headers.
+- Admin database backups are generated with SQLite `VACUUM INTO`, require admin
+  auth plus CSRF for browser sessions, stream with no-store cache headers, and
+  are logged in `admin_action_log`. Local backup files belong in gitignored
+  `backups/`.
 - `helmet` sets security headers and CSP. Current CSP allows same-origin
   scripts/connections, inline styles (Vite emits some), and images from
   `self`, `data:`, and `https:`.
@@ -155,6 +159,8 @@ Useful flows:
 - `GET /api/history/:token`
 - `GET /api/explore` and `/api/explore/:slug` and `/api/explore/:slug/covers`
 - `GET /api/recommendations`
+- Private admin only: `POST /admin/api/database/backup` downloads a SQLite
+  backup through the localhost-bound admin service.
 
 ## UI Rules
 

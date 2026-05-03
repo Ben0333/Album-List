@@ -1,4 +1,6 @@
 import crypto from 'node:crypto';
+import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import bcrypt from 'bcryptjs';
@@ -326,6 +328,45 @@ function count(table, where = '', ...params) {
   return Number(row?.count || 0);
 }
 
+function sqliteStringLiteral(value) {
+  return `'${String(value).replaceAll("'", "''")}'`;
+}
+
+function backupTimestamp() {
+  return new Date().toISOString().replace(/[:.]/g, '-');
+}
+
+function createDatabaseBackup() {
+  const backupDir = fs.mkdtempSync(path.join(os.tmpdir(), 'albums-db-backup-'));
+  const fileName = `albums-${backupTimestamp()}.sqlite`;
+  const filePath = path.join(backupDir, fileName);
+
+  try {
+    db.exec(`VACUUM main INTO ${sqliteStringLiteral(filePath)}`);
+    const sizeBytes = fs.statSync(filePath).size;
+    return {
+      fileName,
+      filePath,
+      sizeBytes,
+      cleanup() {
+        fs.rm(backupDir, { recursive: true, force: true }, (error) => {
+          if (error) console.error(error);
+        });
+      }
+    };
+  } catch (error) {
+    fs.rmSync(backupDir, { recursive: true, force: true });
+    throw error;
+  }
+}
+
+function logAdminAction(action, { userId = null, previousUsername = '', newUsername = '', details = {} } = {}) {
+  db.prepare(
+    `INSERT INTO admin_action_log (action, user_id, previous_username, new_username, details, created_at)
+     VALUES (?, ?, ?, ?, ?, ?)`
+  ).run(action, userId, previousUsername, newUsername, JSON.stringify(details), nowIso());
+}
+
 function safeUser(row) {
   return {
     id: row.id,
@@ -487,6 +528,45 @@ app.get(
   })
 );
 
+app.post(
+  '/admin/api/database/backup',
+  route((req, res, next) => {
+    enforceRateLimit(req, 'database-backup', {
+      limit: 6,
+      windowMs: 60 * 60 * 1000,
+      message: 'Database backups are temporarily rate limited. Try again later.'
+    });
+
+    let backup;
+    try {
+      backup = createDatabaseBackup();
+      logAdminAction('database_backup', {
+        details: {
+          fileName: backup.fileName,
+          sizeBytes: backup.sizeBytes,
+          authKind: req.adminAuth?.kind || 'unknown'
+        }
+      });
+    } catch (error) {
+      if (backup) backup.cleanup();
+      throw error;
+    }
+
+    res.setHeader('Cache-Control', 'no-store');
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('Content-Type', 'application/vnd.sqlite3');
+    res.download(backup.filePath, backup.fileName, (error) => {
+      backup.cleanup();
+      if (!error) return;
+      if (res.headersSent) {
+        console.error(error);
+        return;
+      }
+      next(error);
+    });
+  })
+);
+
 app.get(
   '/admin/api/summary',
   route((req, res) => {
@@ -608,17 +688,12 @@ app.post(
       const disabledAt = user.disabled_at || nowIso();
       db.prepare('UPDATE users SET disabled_at = ?, disabled_reason = ? WHERE id = ?').run(disabledAt, reason, user.id);
       db.prepare('DELETE FROM sessions WHERE user_id = ?').run(user.id);
-      db.prepare(
-        `INSERT INTO admin_action_log (action, user_id, previous_username, new_username, details, created_at)
-         VALUES (?, ?, ?, ?, ?, ?)`
-      ).run(
-        'disable',
-        user.id,
-        user.username,
-        user.username,
-        JSON.stringify({ reason, previousDisabledAt: user.disabled_at || null, previousReason: user.disabled_reason || '' }),
-        nowIso()
-      );
+      logAdminAction('disable', {
+        userId: user.id,
+        previousUsername: user.username,
+        newUsername: user.username,
+        details: { reason, previousDisabledAt: user.disabled_at || null, previousReason: user.disabled_reason || '' }
+      });
       return getAdminUser(user.id);
     })();
 
@@ -635,17 +710,12 @@ app.post(
       if (!user) throw httpError(404, 'User not found.');
 
       db.prepare("UPDATE users SET disabled_at = NULL, disabled_reason = '' WHERE id = ?").run(user.id);
-      db.prepare(
-        `INSERT INTO admin_action_log (action, user_id, previous_username, new_username, details, created_at)
-         VALUES (?, ?, ?, ?, ?, ?)`
-      ).run(
-        'enable',
-        user.id,
-        user.username,
-        user.username,
-        JSON.stringify({ previousDisabledAt: user.disabled_at || null, previousReason: user.disabled_reason || '' }),
-        nowIso()
-      );
+      logAdminAction('enable', {
+        userId: user.id,
+        previousUsername: user.username,
+        newUsername: user.username,
+        details: { previousDisabledAt: user.disabled_at || null, previousReason: user.disabled_reason || '' }
+      });
       return getAdminUser(user.id);
     })();
 
@@ -693,16 +763,38 @@ app.patch(
     const status = String(req.body?.status || '').trim().toLowerCase();
     if (!reportStatuses.has(status)) throw httpError(400, 'Invalid report status.');
 
-    const info = db.prepare('UPDATE bug_reports SET status = ? WHERE id = ?').run(status, reportId);
-    if (!info.changes) throw httpError(404, 'Report not found.');
-    const report = db
-      .prepare(
-        `SELECT br.id, br.user_id, br.body, br.path, br.status, br.created_at, u.username, u.email
-         FROM bug_reports br
-         LEFT JOIN users u ON u.id = br.user_id
-         WHERE br.id = ?`
-      )
-      .get(reportId);
+    const report = transaction(() => {
+      const existing = db
+        .prepare(
+          `SELECT br.id, br.user_id, br.body, br.path, br.status, br.created_at, u.username, u.email
+           FROM bug_reports br
+           LEFT JOIN users u ON u.id = br.user_id
+           WHERE br.id = ?`
+        )
+        .get(reportId);
+      if (!existing) throw httpError(404, 'Report not found.');
+
+      db.prepare('UPDATE bug_reports SET status = ? WHERE id = ?').run(status, reportId);
+      logAdminAction('report_status', {
+        userId: existing.user_id || null,
+        previousUsername: existing.username || '',
+        newUsername: existing.username || '',
+        details: {
+          reportId,
+          previousStatus: existing.status,
+          newStatus: status
+        }
+      });
+
+      return db
+        .prepare(
+          `SELECT br.id, br.user_id, br.body, br.path, br.status, br.created_at, u.username, u.email
+           FROM bug_reports br
+           LEFT JOIN users u ON u.id = br.user_id
+           WHERE br.id = ?`
+        )
+        .get(reportId);
+    })();
     res.json({ report: safeReport(report) });
   })
 );

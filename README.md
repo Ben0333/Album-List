@@ -49,6 +49,10 @@ database persists across rebuilds. The image exposes port 3000 and includes a
 healthcheck against `/api/health`. The base image is `node:22-alpine` and
 builds for `linux/amd64` and `linux/arm64`.
 
+Pushes to `main` publish a multi-architecture Docker image to GitHub Container
+Registry at `ghcr.io/ben0333/album-list:latest`, with SHA tags for pinned
+deployments.
+
 The optional `cloudflared` service publishes the app through a Cloudflare
 Tunnel. It reads `TUNNEL_TOKEN` from `.env.cloudflare`, which is gitignored so
 the connector token does not end up in the repository.
@@ -58,7 +62,9 @@ The optional private admin backend runs as a separate `admin` workspace on port
 Docker Compose publishes it as `127.0.0.1:3001:3001`; keep real admin auth
 secrets in `.env.admin` on the host only. Reach it from another machine with an
 SSH tunnel such as `ssh -N -L 3001:127.0.0.1:3001 turntable`. The admin server
-rejects non-localhost Host headers.
+rejects non-localhost Host headers. The admin console can download a consistent
+SQLite backup; save those files under `backups/` in this workspace if you want
+them next to the repo. `backups/` is gitignored and must stay out of Git.
 
 VM autostart and weekly app-container restart units are documented in
 `deploy/README.md`.
@@ -153,6 +159,8 @@ Before making it public:
 - If using the Compose `cloudflared` service, keep the real tunnel token in
   `.env.cloudflare` on the server only.
 - Keep the SQLite database backed up.
+- Use the private admin backup download or SQLite CLI online backup for manual
+  copies, and store local copies under gitignored `backups/`.
 - Check `GET /api/health` from the load balancer or uptime monitor.
 - Run `npm run check` and `npm run audit` before deploying.
 

@@ -49,6 +49,51 @@ async function api(path, options = {}) {
   return payload;
 }
 
+function fileNameFromDisposition(header, fallback) {
+  const encoded = String(header || '').match(/filename\*=UTF-8''([^;]+)/i)?.[1];
+  if (encoded) {
+    try {
+      return decodeURIComponent(encoded);
+    } catch {
+      return fallback;
+    }
+  }
+  return String(header || '').match(/filename="?([^"]+)"?/i)?.[1] || fallback;
+}
+
+async function downloadDatabaseBackup(button) {
+  const originalText = button.textContent;
+  button.disabled = true;
+  button.textContent = 'Backing up...';
+  try {
+    const headers = new Headers();
+    if (csrfToken) headers.set('x-admin-csrf', csrfToken);
+    const response = await fetch('/admin/api/database/backup', {
+      method: 'POST',
+      headers,
+      credentials: 'include'
+    });
+    if (!response.ok) {
+      const payload = await response.json().catch(() => ({}));
+      throw new Error(payload?.error?.message || `Backup failed with ${response.status}`);
+    }
+
+    const blob = await response.blob();
+    const fileName = fileNameFromDisposition(response.headers.get('content-disposition'), `albums-${new Date().toISOString()}.sqlite`);
+    const url = URL.createObjectURL(blob);
+    const link = el('a', { href: url, download: fileName });
+    document.body.append(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+  } catch (error) {
+    window.alert(error.message);
+  } finally {
+    button.disabled = false;
+    button.textContent = originalText;
+  }
+}
+
 function renderLogin(message = '') {
   clear(root);
   root.className = 'login-shell';
@@ -109,16 +154,23 @@ function renderConsole() {
   root.append(
     el('header', { className: 'topbar' }, [
       el('div', {}, [el('h1', { text: 'Albums Admin' }), el('div', { className: 'muted', text: 'Private backend controls' })]),
-      el('button', {
-        className: 'secondary',
-        text: 'Sign out',
-        onclick: async () => {
-          await api('/admin/api/logout', { method: 'POST' }).catch(() => {});
-          csrfToken = '';
-          sessionStorage.removeItem('albumsAdminCsrf');
-          renderLogin();
-        }
-      })
+      el('div', { className: 'topbar-actions' }, [
+        el('button', {
+          className: 'secondary',
+          text: 'Download DB backup',
+          onclick: (event) => downloadDatabaseBackup(event.currentTarget)
+        }),
+        el('button', {
+          className: 'secondary',
+          text: 'Sign out',
+          onclick: async () => {
+            await api('/admin/api/logout', { method: 'POST' }).catch(() => {});
+            csrfToken = '';
+            sessionStorage.removeItem('albumsAdminCsrf');
+            renderLogin();
+          }
+        })
+      ])
     ]),
     el('section', { id: 'summary', className: 'grid summary-grid' }),
     el('section', { className: 'grid content-grid' }, [

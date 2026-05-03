@@ -24,6 +24,8 @@ RUN npm prune --omit=dev --workspaces --include-workspace-root
 FROM node:${NODE_VERSION} AS runtime
 ENV NODE_ENV=production
 WORKDIR /app
+LABEL org.opencontainers.image.source="https://github.com/Ben0333/Album-List" \
+      org.opencontainers.image.description="Album list web app with accounts, sharing, collaboration, ratings, and private admin controls"
 
 RUN addgroup -S app && adduser -S app -G app
 
