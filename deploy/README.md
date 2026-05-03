@@ -1,9 +1,10 @@
 # VM Deployment Autostart
 
 These deployment helpers keep the Docker Compose deployment running after VM
-reboots and restart only the public app container once per week. The Compose
-file still owns the container-level restart policy (`restart: unless-stopped`)
-for crashes.
+reboots and restart only the public app container once per week. The default
+Compose file starts only the public app; admin and Cloudflare are optional
+Compose overlays. The Compose files still own the container-level restart
+policy (`restart: unless-stopped`) for crashes.
 
 The weekly timer restarts the `app` service only. It leaves `cloudflared`
 running because the tunnel does not need a scheduled restart for normal app
@@ -11,7 +12,7 @@ deployments.
 
 ## Files
 
-- `systemd/albums-compose.service`: brings the Compose project up with
+- `systemd/albums-compose.service`: brings the selected Compose project up with
   `docker compose up -d --remove-orphans` during boot.
 - `systemd/albums-weekly-restart.service`: one-shot weekly restart command for
   the `app` container.
@@ -31,7 +32,7 @@ is somewhere else.
 sudo systemctl enable --now docker
 
 sudo mkdir -p /etc/albums-to-listen-to
-printf 'APP_DIR=/opt/Album-List\nDOCKER_BIN=/usr/bin/docker\n' | sudo tee /etc/albums-to-listen-to/deploy.env
+printf 'APP_DIR=/opt/Album-List\nDOCKER_BIN=/usr/bin/docker\nCOMPOSE_FILE=docker-compose.yml\n' | sudo tee /etc/albums-to-listen-to/deploy.env
 
 sudo cp /opt/Album-List/deploy/systemd/albums-compose.service /etc/systemd/system/
 sudo cp /opt/Album-List/deploy/systemd/albums-weekly-restart.service /etc/systemd/system/
@@ -54,7 +55,7 @@ sudo rc-update add crond default
 sudo rc-service crond start
 
 sudo mkdir -p /etc/albums-to-listen-to /usr/local/sbin
-printf 'APP_DIR=/opt/album-list\nDOCKER_BIN=/usr/bin/docker\n' | sudo tee /etc/albums-to-listen-to/deploy.env
+printf 'APP_DIR=/opt/album-list\nDOCKER_BIN=/usr/bin/docker\nCOMPOSE_FILE=docker-compose.yml\n' | sudo tee /etc/albums-to-listen-to/deploy.env
 
 sudo cp /opt/album-list/deploy/openrc/albums-compose /etc/init.d/albums-compose
 sudo chmod 755 /etc/init.d/albums-compose
@@ -90,6 +91,19 @@ contain `$` characters. Access the admin console from your workstation with
 download SQLite backup files, then store them outside Git, for example under
 the repo-local `backups/` directory.
 
+To opt into admin and Cloudflare on a private production host, include the
+overlay files in `/etc/albums-to-listen-to/deploy.env`:
+
+```sh
+COMPOSE_FILE=docker-compose.yml:docker-compose.admin.yml:docker-compose.cloudflare.yml
+```
+
+The colon separator is for Linux hosts. For one-off commands, the equivalent is:
+
+```sh
+docker compose -f docker-compose.yml -f docker-compose.admin.yml -f docker-compose.cloudflare.yml up -d --remove-orphans
+```
+
 ## Verify
 
 Check that the units are valid and active:
@@ -118,6 +132,7 @@ Check the Compose project and app health endpoint:
 ```sh
 cd /opt/album-list
 docker compose config
+docker compose -f docker-compose.yml -f docker-compose.admin.yml -f docker-compose.cloudflare.yml config
 docker compose ps
 curl -fsS http://127.0.0.1:3000/api/health
 curl -fsS -H "Authorization: Bearer $ADMIN_TOKEN" http://127.0.0.1:3001/admin/api/summary

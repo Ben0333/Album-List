@@ -55,7 +55,6 @@ npm start            # serves built SPA + API at http://localhost:3000
 
 ```sh
 cp .env.example .env   # edit for production
-cp .env.cloudflare.example .env.cloudflare   # production Cloudflare Tunnel token
 docker compose up --build
 ```
 
@@ -70,9 +69,19 @@ Pushes to `main` publish a multi-architecture Docker image to GitHub Container
 Registry at `ghcr.io/ben0333/album-list:latest`, with SHA tags for pinned
 deployments.
 
-The optional `cloudflared` service publishes the app through a Cloudflare
-Tunnel. It reads `TUNNEL_TOKEN` from `.env.cloudflare`, which is gitignored so
-the connector token does not end up in the repository.
+The default Compose file runs only the public app. Optional services are split
+into overlays so a normal self-hosted install does not start private tooling:
+
+```sh
+docker compose up -d
+docker compose -f docker-compose.yml -f docker-compose.admin.yml up -d
+docker compose -f docker-compose.yml -f docker-compose.admin.yml -f docker-compose.cloudflare.yml up -d
+```
+
+Use `docker-compose.admin.yml` when you want the private admin backend. Use
+`docker-compose.cloudflare.yml` when this host should run the Cloudflare Tunnel.
+The optional `cloudflared` service reads `TUNNEL_TOKEN` from `.env.cloudflare`,
+which is gitignored so the connector token does not end up in the repository.
 
 The optional private admin backend runs as a separate `admin` workspace on port
 3001. It has no routes in the public SPA and should stay bound to localhost.
@@ -175,7 +184,10 @@ Before making it public:
 - Set `DATABASE_PATH` to a persistent disk path (the Docker image defaults to
   `/data/albums.sqlite`, mounted as a volume in `docker-compose.yml`).
 - If using the Compose `cloudflared` service, keep the real tunnel token in
-  `.env.cloudflare` on the server only.
+  `.env.cloudflare` on the server only and include
+  `docker-compose.cloudflare.yml` when starting Compose.
+- If using the private admin backend, keep real admin auth in `.env.admin` on
+  the server only and include `docker-compose.admin.yml` when starting Compose.
 - Keep the Docker app and admin port bindings on `127.0.0.1` unless you have a
   separate firewall rule blocking direct public access.
 - Keep the SQLite database backed up.

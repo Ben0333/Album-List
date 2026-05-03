@@ -1,0 +1,27 @@
+services:
+  admin:
+    build: .
+    image: albums-app:local
+    container_name: albums-admin
+    restart: unless-stopped
+    command: ["node", "admin/src/server.js"]
+    ports:
+      - "127.0.0.1:3001:3001"
+    environment:
+      PORT: 3001
+      ADMIN_HOST: 0.0.0.0
+      DATABASE_PATH: /data/albums.sqlite
+      # ADMIN_TOKEN or ADMIN_PASSWORD_HASH should come from .env.admin
+    env_file:
+      - path: .env
+        required: false
+      - path: .env.admin
+        required: false
+    volumes:
+      - ./data:/data
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3001/admin/').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3

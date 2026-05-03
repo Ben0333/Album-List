@@ -83,6 +83,12 @@ In dev, run `npm run dev` to start both Vite (port 5173) and the API server
 - The public app Compose port is intentionally bound as
   `127.0.0.1:3000:3000`; Cloudflare Tunnel should be the public entrypoint.
   Do not change this back to `3000:3000` without adding a host firewall rule.
+- `docker-compose.yml` is intentionally app-only. Keep private admin in
+  `docker-compose.admin.yml` and Cloudflare Tunnel in
+  `docker-compose.cloudflare.yml` so the default self-hosted path stays small.
+  Production hosts that need both overlays should set
+  `COMPOSE_FILE=docker-compose.yml:docker-compose.admin.yml:docker-compose.cloudflare.yml`
+  in `/etc/albums-to-listen-to/deploy.env`.
 - Public API request logging records method, sanitized route path, status,
   duration, and request id for `/api` routes only. It must not log cookies,
   passwords, request bodies, tokens, or raw share/invite/history token URLs.
@@ -125,6 +131,9 @@ Important tables:
 - `track_ratings`: reusable user ratings by normalized `album_key` and `track_key`.
 - `album_average_opt_in`: user-level opt-in/out for aggregate album averages.
 - `explore_album_covers`: persistent on-demand cache for explore cover URLs.
+- `album_cover_cache`: persistent shared cover URL cache by normalized album
+  title and artist. This avoids repeated metadata lookups for covers already
+  discovered by any list or Explore view.
 
 Do not store plaintext passwords. Do not move sessions to localStorage.
 
