@@ -146,6 +146,13 @@ textarea:focus-visible {
   gap: 8px;
 }
 
+.home-corner {
+  position: fixed;
+  top: 18px;
+  left: 20px;
+  z-index: 40;
+}
+
 .report-fab {
   position: fixed;
   right: 20px;
@@ -1551,6 +1558,11 @@ label span {
   .utility-bar {
     top: 12px;
     right: 12px;
+  }
+
+  .home-corner {
+    top: 12px;
+    left: 12px;
   }
 
   .report-fab {

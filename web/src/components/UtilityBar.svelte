@@ -34,6 +34,10 @@
   }
 </script>
 
+<div class="home-corner">
+  <IconButton icon="home" label="Home" active={isHomeActive()} onclick={goHome} />
+</div>
+
 <div class="utility-bar">
   <IconButton
     icon={themeIconName(appState.themePreference)}
@@ -41,7 +45,6 @@
     className="icon-button"
     onclick={cycleTheme}
   />
-  <IconButton icon="home" label="Home" active={isHomeActive()} onclick={goHome} />
   <IconButton
     icon={router.current.type === 'explore' ? 'list' : 'compass'}
     label={router.current.type === 'explore' ? 'My lists' : 'Explore'}
