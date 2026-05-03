@@ -201,9 +201,20 @@ function isLocalAddress(value) {
   return ['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(address);
 }
 
+function isPrivateProxyAddress(value) {
+  const address = String(value || '').trim().toLowerCase().replace(/^::ffff:/, '');
+  return (
+    address.startsWith('10.') ||
+    address.startsWith('192.168.') ||
+    /^172\.(1[6-9]|2\d|3[01])\./.test(address)
+  );
+}
+
 function requireLocalRequest(req) {
   const host = localHostFromHeader(req.get('host'));
-  if (!['127.0.0.1', 'localhost', '::1'].includes(host) || !isLocalAddress(req.socket.remoteAddress)) {
+  const localHostHeader = ['127.0.0.1', 'localhost', '::1'].includes(host);
+  const localConnection = isLocalAddress(req.socket.remoteAddress) || isPrivateProxyAddress(req.socket.remoteAddress);
+  if (!localHostHeader || !localConnection) {
     throw httpError(403, 'Diagnostics are only available from localhost.');
   }
 }
