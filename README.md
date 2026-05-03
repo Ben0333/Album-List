@@ -89,7 +89,8 @@ For the private admin backend, copy `.env.admin.example` to `.env.admin` on the
 server and set either `ADMIN_TOKEN` or `ADMIN_PASSWORD_HASH`. Password login
 also checks `ADMIN_USERNAME`, which defaults to `admin`. The admin service
 refuses to start without one of those auth values. Do not commit the real
-`.env.admin` file.
+`.env.admin` file. Wrap bcrypt hashes in single quotes in `.env.admin` because
+they contain `$` characters.
 
 ## Features
 
