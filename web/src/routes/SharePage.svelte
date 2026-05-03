@@ -16,6 +16,7 @@
     let cancelled = false;
     loading = true;
     loadError = '';
+    payload = null;
     api
       .get<ListPayload>(`/api/share/${encodeURIComponent(token)}`)
       .then((data) => {

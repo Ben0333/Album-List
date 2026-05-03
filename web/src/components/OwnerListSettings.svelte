@@ -41,6 +41,11 @@
         showRatings
       });
       appState.currentListPayload = data;
+      appState.lists = appState.lists.map((list) =>
+        list.id === data.list.id
+          ? { ...list, name: data.list.name, visibility: data.list.visibility }
+          : list
+      );
       appState.notice = 'List settings saved.';
       onSaved?.();
     } catch (err) {

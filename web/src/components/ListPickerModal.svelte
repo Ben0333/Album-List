@@ -26,7 +26,10 @@
 
   $effect(() => {
     const target = appState.listPicker;
-    if (!target) return;
+    if (!target) {
+      lastKey = '';
+      return;
+    }
     const key = `${target.title}|${target.artist}`;
     if (key === lastKey) return;
     lastKey = key;

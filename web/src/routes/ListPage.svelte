@@ -29,6 +29,7 @@
     let cancelled = false;
     loading = true;
     loadError = '';
+    payload = null;
     shareOpen = false;
     peopleOpen = false;
     api
@@ -52,6 +53,12 @@
 
   $effect(() => {
     if (payload) appState.currentListPayload = payload;
+  });
+
+  $effect(() => {
+    const current = appState.currentListPayload;
+    if (!payload || !current || current === payload || current.list.id !== payload.list.id) return;
+    payload = current;
   });
 
   $effect(() => {

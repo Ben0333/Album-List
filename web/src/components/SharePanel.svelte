@@ -79,7 +79,9 @@
 
   function canRemoveMember(member: Member): boolean {
     if (!appState.user || payload.list.kind !== 'collab') return false;
-    if (member.userId === payload.list.ownerUserId) return false;
+    if (member.userId === payload.list.ownerUserId) {
+      return member.userId === appState.user.id;
+    }
     if (payload.permissions.canManage) return true;
     return member.userId === appState.user.id;
   }

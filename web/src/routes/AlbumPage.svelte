@@ -25,6 +25,7 @@
     let cancelled = false;
     loading = true;
     loadError = '';
+    payload = null;
     api
       .get<ListPayload>(url)
       .then((data) => {
