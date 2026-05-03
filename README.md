@@ -60,9 +60,11 @@ docker compose up --build
 ```
 
 The compose file mounts `./data` to `/data` inside the container so the SQLite
-database persists across rebuilds. The image exposes port 3000 and includes a
-healthcheck against `/api/health`. The base image is `node:22-alpine` and
-builds for `linux/amd64` and `linux/arm64`.
+database persists across rebuilds. The public app listens on container port
+3000, and Compose binds it to `127.0.0.1:3000` on the host so Cloudflare Tunnel
+can publish it without exposing direct internet access to port 3000. The image
+includes a healthcheck against `/api/health`. The base image is
+`node:22-alpine` and builds for `linux/amd64` and `linux/arm64`.
 
 Pushes to `main` publish a multi-architecture Docker image to GitHub Container
 Registry at `ghcr.io/ben0333/album-list:latest`, with SHA tags for pinned
@@ -98,6 +100,7 @@ SESSION_DAYS=30
 COOKIE_SECURE=false
 DATABASE_PATH=./data/albums.sqlite
 TRUST_PROXY=false
+SLOW_REQUEST_MS=750
 ```
 
 In production, set `NODE_ENV=production`, `APP_ORIGIN` to the public `https://`
@@ -173,6 +176,8 @@ Before making it public:
   `/data/albums.sqlite`, mounted as a volume in `docker-compose.yml`).
 - If using the Compose `cloudflared` service, keep the real tunnel token in
   `.env.cloudflare` on the server only.
+- Keep the Docker app and admin port bindings on `127.0.0.1` unless you have a
+  separate firewall rule blocking direct public access.
 - Keep the SQLite database backed up.
 - Use the private admin backup download or SQLite CLI online backup for manual
   copies, and store local copies under gitignored `backups/`.
@@ -185,12 +190,48 @@ The app uses SQLite WAL mode, so use one of these approaches:
 
 - Best: SQLite CLI online backup —
   `sqlite3 /data/albums.sqlite ".backup '/backups/albums-$(date +%F).sqlite'"`.
+- App helper: `DATABASE_PATH=/data/albums.sqlite npm run db:backup` writes a
+  consistent `VACUUM INTO` backup to `backups/` by default. Set `BACKUP_DIR` to
+  choose another output directory.
 - Simple: stop the app, then copy the `.sqlite`, `.sqlite-wal`, and
   `.sqlite-shm` files together if WAL files exist.
 - Restore by stopping the app, replacing the database files, then starting the
   app again.
 
 Test restores before launch; an untested backup is not a launch backup.
+
+### Load Testing
+
+Write-heavy load tests live in `scripts/stress/` and use only Node built-ins.
+They create identifiable test users, collaborative lists, albums, completions,
+ratings, chat messages, and low-volume bug reports. They do not call external
+album metadata APIs.
+
+```sh
+npm run check
+npm run audit
+CONCURRENCY=10 DURATION_SECONDS=30 npm run stress:local
+```
+
+Results are written to gitignored `stress-results/`. For a disposable database,
+remove generated rows with:
+
+```sh
+DATABASE_PATH=./data/disposable.sqlite TEST_PREFIX=loadtest CONFIRM_CLEANUP=true npm run stress:cleanup
+```
+
+Remote targets must be explicit:
+
+```sh
+TARGET_URL=http://127.0.0.1:3000 CONCURRENCY=10 DURATION_SECONDS=60 npm run stress:target
+```
+
+The harness refuses non-local write targets, including production, unless
+`ALLOW_PRODUCTION_WRITES=true` and `CONFIRM_TARGET=turntable` are set. Take a
+backup first and start with a small smoke run. Expected beta thresholds are 0
+HTTP 500s, no script timeouts, p95 under 1000 ms at 100 local/staging
+concurrency, and p95 under 2000 ms at 300 local/staging concurrency. HTTP 429s
+from configured rate limits are reported separately and can be acceptable.
 
 ### Limits
 

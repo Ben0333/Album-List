@@ -79,6 +79,15 @@ In dev, run `npm run dev` to start both Vite (port 5173) and the API server
   auth plus CSRF for browser sessions, stream with no-store cache headers, and
   are logged in `admin_action_log`. Local backup files belong in gitignored
   `backups/`.
+- The public app Compose port is intentionally bound as
+  `127.0.0.1:3000:3000`; Cloudflare Tunnel should be the public entrypoint.
+  Do not change this back to `3000:3000` without adding a host firewall rule.
+- Public API request logging records method, sanitized route path, status,
+  duration, and request id for `/api` routes only. It must not log cookies,
+  passwords, request bodies, tokens, or raw share/invite/history token URLs.
+- `GET /api/ops/diagnostics` is for local operational checks only. It reports
+  uptime, Node memory usage, database/WAL/SHM file sizes, and rate-limit bucket
+  count without exposing environment values or secrets.
 - `helmet` sets security headers and CSP. Current CSP allows same-origin
   scripts/connections, inline styles (Vite emits some), and images from
   `self`, `data:`, and `https:`.
@@ -126,6 +135,7 @@ All API endpoints are same-origin JSON under `/api`. Frontend routes go to
 Useful flows:
 
 - `GET /api/health`
+- `GET /api/ops/diagnostics` (localhost/private operational checks only)
 - `POST /api/auth/register`
 - `POST /api/auth/login`
 - `POST /api/auth/logout`
@@ -201,10 +211,33 @@ Maintain:
 npm install
 npm run check        # node --check on server/admin, svelte-check on web
 npm run audit
+npm run db:backup    # writes a SQLite backup under gitignored backups/
 npm run build        # builds web/dist
 npm start            # runs server against the built SPA at :3000
 npm run start:admin  # runs the private admin API at 127.0.0.1:3001 with admin auth env set
 ```
+
+Load-test workflow for disposable local/staging databases:
+
+```sh
+CONCURRENCY=10 DURATION_SECONDS=30 npm run stress:local
+DATABASE_PATH=./data/disposable.sqlite TEST_PREFIX=loadtest CONFIRM_CLEANUP=true npm run stress:cleanup
+```
+
+Remote smoke/load runs must pass `TARGET_URL`; non-local write targets require
+`ALLOW_PRODUCTION_WRITES=true CONFIRM_TARGET=turntable`. Do not run a full
+write stress test against production first. Take a backup, run a small smoke
+load, verify `/api/health`, inspect `stress-results/*.json`, and confirm DB/WAL
+growth is expected.
+
+Acceptance targets for local/staging beta readiness:
+
+- 0 unhandled script errors.
+- 0 HTTP 500 responses.
+- p95 under 1000 ms for 100 concurrency.
+- p95 under 2000 ms for 300 concurrency.
+- HTTP 429s only where expected from configured rate limits.
+- App health remains `{ ok: true, database: "ok" }` after the run.
 
 Smoke-tested flows: health check, account registration, guest album import,
 personal list fetch, album creation/removal, track rating, completion toggle,

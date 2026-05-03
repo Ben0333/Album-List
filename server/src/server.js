@@ -44,6 +44,7 @@ const metadataUserAgent = `AlbumsToListenTo/0.1 (${config.appOrigin})`;
 const metadataCacheMaxEntries = 250;
 const albumSearchCacheTtlMs = 5 * 60 * 1000;
 const albumLookupCacheTtlMs = 20 * 60 * 1000;
+const slowRequestMs = parsePositiveInteger(process.env.SLOW_REQUEST_MS, 750, { min: 1, max: 60_000 });
 let musicBrainzQueue = Promise.resolve();
 let lastMusicBrainzRequestAt = 0;
 
@@ -86,6 +87,7 @@ app.use((req, res, next) => {
 });
 
 app.use(compression());
+app.use(logApiRequest);
 app.use(validateRequestOrigin);
 app.use(express.json({ limit: '2mb' }));
 app.use(loadSession);
@@ -117,6 +119,12 @@ function httpError(status, message) {
 
 function cachePublic(res, maxAgeSeconds, staleSeconds = maxAgeSeconds) {
   res.setHeader('Cache-Control', `public, max-age=${maxAgeSeconds}, stale-while-revalidate=${staleSeconds}`);
+}
+
+function parsePositiveInteger(value, fallback, { min = 1, max = Number.MAX_SAFE_INTEGER } = {}) {
+  const parsed = Number(value || fallback);
+  if (!Number.isInteger(parsed) || parsed < min || parsed > max) return fallback;
+  return parsed;
 }
 
 function rateLimitError(message, retryAfterSeconds) {
@@ -178,6 +186,28 @@ function parseCookies(header = '') {
   );
 }
 
+function localHostFromHeader(hostHeader) {
+  const host = String(hostHeader || '').trim().toLowerCase();
+  if (!host) return '';
+  if (host.startsWith('[')) {
+    const end = host.indexOf(']');
+    return end === -1 ? '' : host.slice(1, end);
+  }
+  return host.split(':')[0];
+}
+
+function isLocalAddress(value) {
+  const address = String(value || '').trim().toLowerCase();
+  return ['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(address);
+}
+
+function requireLocalRequest(req) {
+  const host = localHostFromHeader(req.get('host'));
+  if (!['127.0.0.1', 'localhost', '::1'].includes(host) || !isLocalAddress(req.socket.remoteAddress)) {
+    throw httpError(403, 'Diagnostics are only available from localhost.');
+  }
+}
+
 function clientIp(req) {
   return req.ip || req.socket.remoteAddress || 'unknown';
 }
@@ -210,12 +240,65 @@ function enforceRateLimit(req, scope, { limit, windowMs, key = rateLimitIdentity
   }
 }
 
+function fallbackSafeApiPath(pathname) {
+  const pathValue = String(pathname || '');
+  if (pathValue.startsWith('/api/share/')) return '/api/share/:token';
+  if (pathValue.startsWith('/api/invites/')) return pathValue.replace(/^\/api\/invites\/[^/]+/, '/api/invites/:token');
+  if (pathValue.startsWith('/api/history/')) return pathValue.replace(/^\/api\/history\/[^/]+/, '/api/history/:token');
+  return pathValue
+    .split('/')
+    .map((segment) => (segment.length >= 24 && /^[a-zA-Z0-9_-]+$/.test(segment) ? ':opaque' : segment))
+    .join('/');
+}
+
+function safeRoutePath(req) {
+  const routePath = req.route?.path;
+  if (typeof routePath === 'string') return routePath;
+  return fallbackSafeApiPath(req.path);
+}
+
+function logApiRequest(req, res, next) {
+  if (!req.path.startsWith('/api/')) {
+    next();
+    return;
+  }
+
+  const startedAt = process.hrtime.bigint();
+  const requestId = crypto.randomUUID();
+  res.setHeader('X-Request-Id', requestId);
+  res.on('finish', () => {
+    const durationMs = Number(process.hrtime.bigint() - startedAt) / 1_000_000;
+    const slow = durationMs >= slowRequestMs;
+    if (req.path === '/api/health' && res.statusCode < 400 && !slow) return;
+    console.log(
+      JSON.stringify({
+        event: 'api_request',
+        requestId,
+        method: req.method,
+        path: safeRoutePath(req),
+        status: res.statusCode,
+        durationMs: Math.round(durationMs),
+        slow
+      })
+    );
+  });
+  next();
+}
+
 function randomToken(bytes = 32) {
   return crypto.randomBytes(bytes).toString('base64url');
 }
 
 function hashToken(token) {
   return crypto.createHash('sha256').update(token).digest('hex');
+}
+
+function fileSize(pathname) {
+  try {
+    return fs.statSync(pathname).size;
+  } catch {
+    return 0;
+  }
 }
 
 function normalizeEmail(value) {
@@ -2684,6 +2767,28 @@ app.get(
   route((req, res) => {
     db.prepare('SELECT 1').get();
     res.json({ ok: true, time: nowIso(), uptimeSeconds: Math.round(process.uptime()), database: 'ok' });
+  })
+);
+
+app.get(
+  '/api/ops/diagnostics',
+  route((req, res) => {
+    requireLocalRequest(req);
+    db.prepare('SELECT 1').get();
+    const databasePath = config.databasePath;
+    res.setHeader('Cache-Control', 'no-store');
+    res.json({
+      ok: true,
+      time: nowIso(),
+      uptimeSeconds: Math.round(process.uptime()),
+      memory: process.memoryUsage(),
+      database: {
+        mainBytes: fileSize(databasePath),
+        walBytes: fileSize(`${databasePath}-wal`),
+        shmBytes: fileSize(`${databasePath}-shm`)
+      },
+      rateLimitBuckets: rateLimitBuckets.size
+    });
   })
 );
 

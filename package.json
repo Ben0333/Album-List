@@ -19,7 +19,12 @@
     "start": "npm run start -w @albums/server",
     "start:admin": "npm run start -w @albums/admin",
     "check": "npm run check -w @albums/server && npm run check -w @albums/admin && npm run check -w @albums/web",
-    "audit": "npm audit --omit=dev"
+    "audit": "npm audit --omit=dev",
+    "db:backup": "node scripts/backup-db.js",
+    "stress:local": "node scripts/stress/write-load.js",
+    "stress:target": "node scripts/stress/write-load.js --target-required",
+    "smoke:target": "node scripts/stress/write-load.js --target-required --smoke",
+    "stress:cleanup": "node scripts/stress/cleanup-load-data.js"
   },
   "devDependencies": {
     "concurrently": "^9.1.0"
