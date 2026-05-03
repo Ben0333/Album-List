@@ -1,0 +1,10 @@
+[Unit]
+Description=Weekly restart for the Albums app container
+Documentation=https://github.com/Ben0333/Album-List
+Requires=docker.service albums-compose.service
+After=docker.service albums-compose.service
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/albums-to-listen-to/deploy.env
+ExecStart=/bin/sh -lc 'cd "$APP_DIR" && "${DOCKER_BIN:-/usr/bin/docker}" compose restart app'

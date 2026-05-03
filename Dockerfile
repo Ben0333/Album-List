@@ -6,11 +6,13 @@ WORKDIR /build
 ENV CI=1
 
 COPY package.json package-lock.json* ./
+COPY admin/package.json admin/
 COPY server/package.json server/
 COPY web/package.json web/
 COPY shared/package.json shared/
 RUN npm ci --workspaces --include-workspace-root --ignore-scripts
 
+COPY admin/ admin/
 COPY shared/ shared/
 COPY server/ server/
 COPY web/ web/
@@ -27,6 +29,7 @@ RUN addgroup -S app && adduser -S app -G app
 
 COPY --from=builder /build/package.json /build/package-lock.json* ./
 COPY --from=builder /build/node_modules ./node_modules
+COPY --from=builder /build/admin ./admin
 COPY --from=builder /build/server ./server
 COPY --from=builder /build/shared ./shared
 COPY --from=builder /build/web/dist ./web/dist
@@ -37,7 +40,7 @@ USER app
 ENV PORT=3000 \
     DATABASE_PATH=/data/albums.sqlite
 
-EXPOSE 3000
+EXPOSE 3000 3001
 VOLUME ["/data"]
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \

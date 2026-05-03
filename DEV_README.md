@@ -37,6 +37,7 @@ Core rules:
 server/                      Express JSON API
   src/server.js              public Express app: auth/session, REST routes, list/rating/history logic
   src/explore-data.js        static curated explore-list data
+admin/                       Private Express admin API, no public SPA routes
 web/                         Svelte 5 + Vite + TypeScript SPA
   src/App.svelte             route dispatcher
   src/main.ts                mount entry, imports global styles.css
@@ -68,6 +69,11 @@ In dev, run `npm run dev` to start both Vite (port 5173) and the API server
 - Mutating `/api` requests are same-origin protected with `Origin` and Fetch
   Metadata checks. Keep new write endpoints under `/api` so this middleware
   applies.
+- Private admin endpoints live under `/admin/api` in the separate `admin`
+  workspace and listen on port 3001. Keep them off the public app and require
+  `ADMIN_TOKEN` or `ADMIN_PASSWORD_HASH`; never expose password hashes, session
+  token hashes, share/invite/history tokens, IP hashes, or Cloudflare tokens.
+  The admin console static files are served by the admin service only.
 - `helmet` sets security headers and CSP. Current CSP allows same-origin
   scripts/connections, inline styles (Vite emits some), and images from
   `self`, `data:`, and `https:`.
@@ -186,10 +192,11 @@ Maintain:
 
 ```sh
 npm install
-npm run check        # node --check on server, svelte-check on web
+npm run check        # node --check on server/admin, svelte-check on web
 npm run audit
 npm run build        # builds web/dist
 npm start            # runs server against the built SPA at :3000
+npm run start:admin  # runs the private admin API at 127.0.0.1:3001 with admin auth env set
 ```
 
 Smoke-tested flows: health check, account registration, guest album import,

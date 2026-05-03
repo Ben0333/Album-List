@@ -16,6 +16,27 @@ services:
     volumes:
       - ./data:/data
 
+  admin:
+    build: .
+    image: albums-app:local
+    container_name: albums-admin
+    restart: unless-stopped
+    command: ["node", "admin/src/server.js"]
+    ports:
+      - "127.0.0.1:3001:3001"
+    environment:
+      PORT: 3001
+      ADMIN_HOST: 0.0.0.0
+      DATABASE_PATH: /data/albums.sqlite
+      # ADMIN_TOKEN or ADMIN_PASSWORD_HASH should come from .env.admin
+    env_file:
+      - path: .env
+        required: false
+      - path: .env.admin
+        required: false
+    volumes:
+      - ./data:/data
+
   cloudflared:
     image: cloudflare/cloudflared:latest
     container_name: cloudflared
@@ -25,3 +46,14 @@ services:
     env_file:
       - path: .env.cloudflare
         required: true
+
+  cloudflared-admin:
+    profiles:
+      - admin-cloudflare
+    image: cloudflare/cloudflared:latest
+    container_name: cloudflared-admin
+    restart: unless-stopped
+    network_mode: host
+    command: tunnel --no-autoupdate --config /etc/cloudflared/config.yml run
+    volumes:
+      - ./.cloudflared-admin:/etc/cloudflared:ro

@@ -53,6 +53,16 @@ The optional `cloudflared` service publishes the app through a Cloudflare
 Tunnel. It reads `TUNNEL_TOKEN` from `.env.cloudflare`, which is gitignored so
 the connector token does not end up in the repository.
 
+The optional private admin backend runs as a separate `admin` workspace on port
+3001. It has no routes in the public SPA and should stay bound to localhost.
+Docker Compose publishes it as `127.0.0.1:3001:3001`; keep real admin auth
+secrets in `.env.admin` on the host only. A separate profiled
+`cloudflared-admin` service can publish only that private admin service through
+Cloudflare Tunnel.
+
+VM autostart and weekly app-container restart units are documented in
+`deploy/README.md`.
+
 ## Configuration
 
 Copy `.env.example` to `.env` for custom settings. Defaults work for
@@ -74,6 +84,12 @@ origin, `COOKIE_SECURE=true`, an explicit persistent `DATABASE_PATH`, and
 `TRUST_PROXY=true` when Express is behind a reverse proxy that terminates TLS.
 The server refuses to start in production if those public-facing settings are
 unsafe.
+
+For the private admin backend, copy `.env.admin.example` to `.env.admin` on the
+server and set either `ADMIN_TOKEN` or `ADMIN_PASSWORD_HASH`. Password login
+also checks `ADMIN_USERNAME`, which defaults to `admin`. The admin service
+refuses to start without one of those auth values. Do not commit the real
+`.env.admin` file.
 
 ## Features
 

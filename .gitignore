@@ -3,12 +3,14 @@
 **/.env.*
 !**/.env.example
 !**/.env.cloudflare.example
+!**/.env.admin.example
 **/data/*.sqlite
 **/data/*.sqlite-*
 npm-debug.log*
 .DS_Store
 **/.server.pid
 **/.admin.pid
+.cloudflared-admin/
 *.bat
 web/dist
 .vite

@@ -1,0 +1,17 @@
+[Unit]
+Description=Albums to Listen To Docker Compose stack
+Documentation=https://github.com/Ben0333/Album-List
+Requires=docker.service
+Wants=network-online.target
+After=docker.service network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/albums-to-listen-to/deploy.env
+ExecStart=/bin/sh -lc 'cd "$APP_DIR" && "${DOCKER_BIN:-/usr/bin/docker}" compose up -d --remove-orphans'
+ExecStop=/bin/sh -lc 'cd "$APP_DIR" && "${DOCKER_BIN:-/usr/bin/docker}" compose stop'
+RemainAfterExit=yes
+TimeoutStartSec=0
+
+[Install]
+WantedBy=multi-user.target

@@ -5,6 +5,7 @@
 **/.env
 **/.env.*
 !**/.env.example
+!**/.env.admin.example
 **/data/*.sqlite
 **/data/*.sqlite-*
 **/dist
@@ -13,5 +14,6 @@ README.md
 **/.DS_Store
 **/.server.pid
 **/*.bat
+.cloudflared-admin
 docker-compose.yml
 Dockerfile

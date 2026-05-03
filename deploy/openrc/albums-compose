@@ -1,0 +1,41 @@
+#!/sbin/openrc-run
+
+description="Albums to Listen To Docker Compose stack"
+
+depend() {
+  need docker
+  after net-online
+}
+
+load_config() {
+  if [ ! -r /etc/albums-to-listen-to/deploy.env ]; then
+    eerror "/etc/albums-to-listen-to/deploy.env is missing"
+    return 1
+  fi
+  # shellcheck disable=SC1091
+  . /etc/albums-to-listen-to/deploy.env
+  if [ -z "${APP_DIR:-}" ]; then
+    eerror "APP_DIR is not set in /etc/albums-to-listen-to/deploy.env"
+    return 1
+  fi
+  DOCKER_BIN="${DOCKER_BIN:-/usr/bin/docker}"
+}
+
+start() {
+  load_config || return 1
+  ebegin "Starting Albums Compose stack"
+  cd "$APP_DIR" && "$DOCKER_BIN" compose up -d --remove-orphans
+  eend $?
+}
+
+stop() {
+  load_config || return 1
+  ebegin "Stopping Albums Compose stack"
+  cd "$APP_DIR" && "$DOCKER_BIN" compose stop
+  eend $?
+}
+
+status() {
+  load_config || return 1
+  cd "$APP_DIR" && "$DOCKER_BIN" compose ps
+}
