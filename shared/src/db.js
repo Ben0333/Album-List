@@ -98,6 +98,7 @@ db.exec(`
     list_album_id INTEGER NOT NULL REFERENCES list_albums(id) ON DELETE CASCADE,
     track_key TEXT NOT NULL,
     title TEXT NOT NULL,
+    disc_number INTEGER NOT NULL DEFAULT 1,
     position INTEGER NOT NULL DEFAULT 0
   );
 
@@ -203,7 +204,7 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_list_members_user ON list_members(user_id, list_id);
   CREATE INDEX IF NOT EXISTS idx_list_albums_list ON list_albums(list_id, sort_order);
   CREATE INDEX IF NOT EXISTS idx_list_albums_album_key ON list_albums(album_key);
-  CREATE INDEX IF NOT EXISTS idx_album_tracks_album ON album_tracks(list_album_id, position);
+  CREATE INDEX IF NOT EXISTS idx_album_tracks_album ON album_tracks(list_album_id, disc_number, position);
   CREATE INDEX IF NOT EXISTS idx_completions_album ON album_completions(list_album_id);
   CREATE INDEX IF NOT EXISTS idx_removal_votes_album ON list_album_removal_votes(list_album_id);
   CREATE INDEX IF NOT EXISTS idx_list_messages_list ON list_messages(list_id, created_at);
@@ -230,7 +231,11 @@ db.exec(`
 function ensureColumn(table, column, definition) {
   const columns = db.prepare(`PRAGMA table_info(${table})`).all();
   if (!columns.some((row) => row.name === column)) {
-    db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+    try {
+      db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+    } catch (error) {
+      if (!/duplicate column name/i.test(String(error?.message || ''))) throw error;
+    }
   }
 }
 
@@ -240,6 +245,7 @@ ensureColumn('users', 'accent_color', "TEXT NOT NULL DEFAULT ''");
 ensureColumn('users', 'disabled_at', 'TEXT');
 ensureColumn('users', 'disabled_reason', "TEXT NOT NULL DEFAULT ''");
 ensureColumn('users', 'anonymized_at', 'TEXT');
+ensureColumn('album_tracks', 'disc_number', 'INTEGER NOT NULL DEFAULT 1');
 
 db.exec(`
   CREATE INDEX IF NOT EXISTS idx_users_disabled ON users(disabled_at);
@@ -388,8 +394,8 @@ function ensureUniqueListAlbums() {
           const duplicateTrackCount = db.prepare('SELECT COUNT(*) AS count FROM album_tracks WHERE list_album_id = ?').get(duplicate.id).count;
           if (!keeperTrackCount && duplicateTrackCount) {
             db.prepare(
-              `INSERT INTO album_tracks (list_album_id, track_key, title, position)
-               SELECT ?, track_key, title, position
+              `INSERT INTO album_tracks (list_album_id, track_key, title, disc_number, position)
+               SELECT ?, track_key, title, disc_number, position
                FROM album_tracks
                WHERE list_album_id = ?`
             ).run(keeper.id, duplicate.id);
@@ -447,14 +453,14 @@ function repairKnownAlbumTracklists() {
 
     const deleteTracks = db.prepare('DELETE FROM album_tracks WHERE list_album_id = ?');
     const insertTrack = db.prepare(
-      `INSERT INTO album_tracks (list_album_id, track_key, title, position)
-       VALUES (?, ?, ?, ?)`
+      `INSERT INTO album_tracks (list_album_id, track_key, title, disc_number, position)
+       VALUES (?, ?, ?, ?, ?)`
     );
 
     for (const album of affectedAlbums) {
       deleteTracks.run(album.id);
       canonicalTracks.forEach((title, index) => {
-        insertTrack.run(album.id, trackKey(title, index + 1), title, index + 1);
+        insertTrack.run(album.id, trackKey(title, index + 1), title, 1, index + 1);
       });
     }
   })();

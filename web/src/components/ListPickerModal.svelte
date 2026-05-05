@@ -75,7 +75,8 @@
         const result = await api.post<{ albumId: number; copied: boolean }>(`/api/lists/${list.listId}/albums/copy`, {
           title: target.title,
           artist: target.artist,
-          coverUrl: target.coverUrl
+          coverUrl: target.coverUrl,
+          tracks: target.tracks ?? []
         });
         lists = lists.map((item) => (item.listId === list.listId ? { ...item, albumId: result.albumId } : item));
         appState.notice = result.copied ? `Added to "${list.name}".` : `Already in "${list.name}".`;

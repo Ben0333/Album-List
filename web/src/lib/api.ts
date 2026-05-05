@@ -24,10 +24,13 @@ async function request<T>(method: string, path: string, body?: Json): Promise<T>
   const text = await res.text();
   const parsed = text ? safeJson(text) : null;
   if (!res.ok) {
+    const apiError = parsed && typeof parsed === 'object' && 'error' in parsed ? parsed.error : null;
     const message =
-      (parsed && typeof parsed === 'object' && 'error' in parsed && typeof parsed.error === 'string'
-        ? parsed.error
-        : null) ?? res.statusText ?? `HTTP ${res.status}`;
+      (typeof apiError === 'string'
+        ? apiError
+        : apiError && typeof apiError === 'object' && 'message' in apiError && typeof apiError.message === 'string'
+          ? apiError.message
+          : null) ?? res.statusText ?? `HTTP ${res.status}`;
     throw new ApiError(res.status, message, parsed);
   }
   return parsed as T;

@@ -25,6 +25,11 @@
       busy = false;
     }
   }
+
+  function signInPath(): string {
+    const path = `${window.location.pathname}${window.location.search}`;
+    return `/login?next=${encodeURIComponent(path)}`;
+  }
 </script>
 
 <main class="page-shell">
@@ -33,7 +38,7 @@
     {#if appState.user}
       <IconButton icon="check" label="Join list" className="primary" disabled={busy} onclick={join} />
     {:else}
-      <IconButton icon="log-in" label="Sign in to join" className="primary" onclick={() => navigate('/login')} />
+      <IconButton icon="log-in" label="Sign in to join" className="primary" onclick={() => navigate(signInPath())} />
     {/if}
     {#if pageError}
       <div class="error-line">{pageError}</div>

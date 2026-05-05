@@ -23,6 +23,12 @@
   const isRegister = $derived(appState.authMode === 'register');
   const guestCount = $derived(appState.guest.albums.length);
 
+  function safeNextPath(): string {
+    const next = new URLSearchParams(window.location.search).get('next') || '';
+    if (!next.startsWith('/') || next.startsWith('//') || next.startsWith('/api/')) return '';
+    return next;
+  }
+
   async function submit(event: SubmitEvent): Promise<void> {
     event.preventDefault();
     if (submitting) return;
@@ -51,8 +57,13 @@
       }
       clearGuest();
       await refreshMe();
-      const personal = appState.lists.find((list) => list.kind === 'personal') ?? appState.lists[0];
-      navigate(personal ? `/list/${personal.id}` : '/');
+      const next = safeNextPath();
+      if (next) {
+        navigate(next);
+      } else {
+        const personal = appState.lists.find((list) => list.kind === 'personal') ?? appState.lists[0];
+        navigate(personal ? `/list/${personal.id}` : '/');
+      }
     } catch (err) {
       formError = getErrorMessage(err);
     } finally {
