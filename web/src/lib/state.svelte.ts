@@ -56,7 +56,12 @@ export interface AppState {
   currentListPayload: ListPayload | null;
   chatOpen: boolean;
   chatReadIds: Record<string, number>;
-  listPicker: { title: string; artist: string; coverUrl: string | null } | null;
+  listPicker: {
+    title: string;
+    artist: string;
+    coverUrl: string | null;
+    tracks?: Array<{ title: string; trackKey?: string; discNumber?: number; position?: number }>;
+  } | null;
   avatarCrop: { dataUrl: string; zoom: number; x: number; y: number } | null;
 }
 

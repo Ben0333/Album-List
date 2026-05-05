@@ -22,6 +22,7 @@
   const canInvite = $derived(payload.permissions.canManage && payload.list.kind === 'collab');
   const memberIds = $derived<ReadonlySet<number>>(new Set(payload.members.map((m) => m.userId)));
   const shareUrl = $derived(`${window.location.origin}/share/${payload.list.shareToken}`);
+  const inviteUrl = $derived(payload.list.inviteToken ? `${window.location.origin}/invite/${payload.list.inviteToken}` : '');
 
   async function copyShareLink(): Promise<void> {
     panelError = '';
@@ -85,6 +86,17 @@
     if (payload.permissions.canManage) return true;
     return member.userId === appState.user.id;
   }
+
+  async function copyInviteLink(): Promise<void> {
+    panelError = '';
+    if (!inviteUrl) {
+      panelError = 'Join link is not available for this list.';
+      return;
+    }
+    const ok = await copyText(inviteUrl);
+    if (ok) appState.notice = 'Join link copied.';
+    else panelError = 'Could not copy join link. Highlight and copy manually.';
+  }
 </script>
 
 <section class="share-panel">
@@ -97,6 +109,9 @@
   </div>
   {#if panelError}<div class="error-line">{panelError}</div>{/if}
   {#if canInvite}
+    <div class="button-row left tight">
+      <IconButton icon="copy" label="Copy join link" onclick={copyInviteLink} />
+    </div>
     <div class="share-search">
       <UserSearch excludeIds={memberIds} onPick={inviteUser} />
       <select bind:value={role}>

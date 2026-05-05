@@ -35,7 +35,7 @@ export interface ListSummary {
 export interface InviteSummary {
   id: number;
   list: { id: number; name: string };
-  inviter: { username: string };
+  inviter: { username: string; avatarColor?: string | null; avatarUrl?: string | null };
   role: 'editor' | 'viewer';
   createdAt: string;
 }
@@ -101,6 +101,7 @@ export interface TrackRating {
 export interface AlbumTrack {
   id: number;
   title: string;
+  discNumber: number;
   position: number;
   trackKey: string;
   userRating: TrackRating | null;

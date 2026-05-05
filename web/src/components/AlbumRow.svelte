@@ -100,7 +100,17 @@
         label="Add"
         className="pill"
         onclick={() => {
-          appState.listPicker = { title: album.title, artist: album.artist, coverUrl: album.coverUrl };
+          appState.listPicker = {
+            title: album.title,
+            artist: album.artist,
+            coverUrl: album.coverUrl,
+            tracks: album.tracks.map((track) => ({
+              title: track.title,
+              trackKey: track.trackKey,
+              discNumber: track.discNumber,
+              position: track.position
+            }))
+          };
         }}
       />
     {/if}

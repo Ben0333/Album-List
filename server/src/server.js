@@ -783,6 +783,15 @@ function getPendingInvites(userId) {
       id: invite.id,
       role: invite.role,
       createdAt: invite.created_at,
+      list: {
+        id: invite.list_id,
+        name: invite.list_name
+      },
+      inviter: {
+        username: invite.inviter_username,
+        avatarColor: invite.inviter_avatar_color,
+        avatarUrl: safeAvatarDataUrl(invite.inviter_avatar_data_url)
+      },
       listId: invite.list_id,
       listName: invite.list_name,
       inviterUsername: invite.inviter_username,
@@ -884,17 +893,26 @@ function listMembers(listId) {
 function sanitizeTracks(value) {
   const rawTracks = Array.isArray(value) ? value : [];
   return rawTracks
-    .map((track, index) => ({
-      title: clampText(typeof track === 'string' ? track : track?.title, 160),
-      keyTitle: clampText(typeof track === 'string' ? track : track?.keyTitle || track?.title, 160),
-      position: Number(track?.position || index + 1)
-    }))
+    .map((track, index) => {
+      const discNumber = Number(track?.discNumber ?? track?.disc_number ?? track?.disc ?? 1);
+      const position = Number(track?.position ?? track?.trackNumber ?? index + 1);
+      return {
+        title: clampText(typeof track === 'string' ? track : track?.title, 160),
+        keyTitle: clampText(typeof track === 'string' ? track : track?.keyTitle || track?.title, 160),
+        trackKey: clampText(typeof track === 'string' ? '' : track?.trackKey || track?.track_key, 220),
+        discNumber: Number.isInteger(discNumber) && discNumber > 0 ? discNumber : 1,
+        position: Number.isInteger(position) && position > 0 ? position : index + 1,
+        inputIndex: index
+      };
+    })
     .filter((track) => track.title)
+    .sort((a, b) => a.discNumber - b.discNumber || a.position - b.position || a.inputIndex - b.inputIndex)
     .slice(0, 80)
     .map((track, index) => ({
       title: track.title,
+      discNumber: track.discNumber,
       position: index + 1,
-      trackKey: trackKey(track.keyTitle || track.title, index + 1)
+      trackKey: track.trackKey || trackKey(track.keyTitle || track.title, index + 1)
     }));
 }
 
@@ -1599,6 +1617,7 @@ async function lookupItunesAlbumData(id, country = 'US', lang = '') {
     .map((track, index) => ({
       title: clampText(track.trackName, 160),
       keyTitle: clampText(track.trackName, 160),
+      discNumber: Number(track.discNumber || 1),
       position: index + 1
     }))
     .filter((track) => track.title);
@@ -1660,9 +1679,16 @@ async function lookupMusicBrainzRelease(releaseId) {
   url.searchParams.set('fmt', 'json');
   const data = await fetchMusicBrainzJson(url);
   const tracks = (data.media || [])
-    .flatMap((medium) => medium.tracks || [])
+    .flatMap((medium, mediumIndex) =>
+      (medium.tracks || []).map((track, trackIndex) => ({
+        ...track,
+        discNumber: Number(medium.position || mediumIndex + 1),
+        mediumTrackIndex: trackIndex
+      }))
+    )
     .map((track, index) => ({
       title: clampText(track.title || track.recording?.title, 160),
+      discNumber: Number(track.discNumber || 1),
       position: index + 1
     }))
     .filter((track) => track.title);
@@ -1779,11 +1805,11 @@ function insertAlbum(listId, userId, albumInput) {
     .run(listId, key, title, artist, coverUrl, notes, maxOrder + 1, userId, nowIso(), nowIso());
 
   const insertTrack = db.prepare(
-    `INSERT INTO album_tracks (list_album_id, track_key, title, position)
-     VALUES (?, ?, ?, ?)`
+    `INSERT INTO album_tracks (list_album_id, track_key, title, disc_number, position)
+     VALUES (?, ?, ?, ?, ?)`
   );
   for (const track of tracks) {
-    insertTrack.run(info.lastInsertRowid, track.trackKey, track.title, track.position);
+    insertTrack.run(info.lastInsertRowid, track.trackKey, track.title, track.discNumber || 1, track.position);
   }
 
   return Number(info.lastInsertRowid);
@@ -1792,11 +1818,11 @@ function insertAlbum(listId, userId, albumInput) {
 function replaceAlbumTracks(listAlbumId, tracks) {
   db.prepare('DELETE FROM album_tracks WHERE list_album_id = ?').run(listAlbumId);
   const insertTrack = db.prepare(
-    `INSERT INTO album_tracks (list_album_id, track_key, title, position)
-     VALUES (?, ?, ?, ?)`
+    `INSERT INTO album_tracks (list_album_id, track_key, title, disc_number, position)
+     VALUES (?, ?, ?, ?, ?)`
   );
   for (const track of sanitizeTracks(tracks)) {
-    insertTrack.run(listAlbumId, track.trackKey, track.title, track.position);
+    insertTrack.run(listAlbumId, track.trackKey, track.title, track.discNumber || 1, track.position);
   }
 }
 
@@ -1812,7 +1838,9 @@ function syncTrackRatingTitles(albumKeyValue, tracks) {
 }
 
 function existingTrackRows(listAlbumId) {
-  return db.prepare('SELECT track_key, title, position FROM album_tracks WHERE list_album_id = ? ORDER BY position, id').all(listAlbumId);
+  return db
+    .prepare('SELECT track_key, title, disc_number, position FROM album_tracks WHERE list_album_id = ? ORDER BY disc_number, position, id, track_key')
+    .all(listAlbumId);
 }
 
 function isOrderedSubset(needles, haystack) {
@@ -1869,6 +1897,71 @@ function updateExistingAlbumFromInput(existing, albumInput, listId) {
     }
     return changed;
   })();
+}
+
+function existingTracksForAlbumKey(albumKeyValue) {
+  const source = db
+    .prepare(
+      `SELECT la.id
+       FROM list_albums la
+       JOIN album_tracks at ON at.list_album_id = la.id
+       WHERE la.album_key = ?
+       GROUP BY la.id
+       ORDER BY COUNT(at.id) DESC, MAX(la.updated_at) DESC, la.id DESC
+       LIMIT 1`
+    )
+    .get(albumKeyValue);
+  if (!source) return [];
+
+  return db
+    .prepare(
+      `SELECT track_key AS trackKey, title, disc_number AS discNumber, position
+       FROM album_tracks
+       WHERE list_album_id = ?
+       ORDER BY disc_number, position, id, track_key`
+    )
+    .all(source.id);
+}
+
+function albumMetadataMatchesInput(candidate, title, artist) {
+  const candidateTitle = normalizeText(candidate?.title);
+  const targetTitle = normalizeText(title);
+  if (!candidateTitle || candidateTitle !== targetTitle) return false;
+  const targetArtist = normalizeText(artist);
+  if (!targetArtist) return true;
+  const candidateArtist = normalizeText(candidate?.artist);
+  if (!candidateArtist) return false;
+  return candidateArtist === targetArtist || candidateArtist.includes(targetArtist) || targetArtist.includes(candidateArtist);
+}
+
+async function hydrateAlbumInputTracks(albumInput, req) {
+  if (sanitizeTracks(albumInput?.tracks).length) return albumInput;
+
+  const title = clampText(albumInput?.title, 160);
+  if (!title) return albumInput;
+  const artist = clampText(albumInput?.artist, 160);
+  const key = albumKey(title, artist);
+  const existingTracks = existingTracksForAlbumKey(key);
+  if (existingTracks.length) return { ...albumInput, tracks: existingTracks };
+
+  limitAlbumLookup(req);
+  const country = itunesCountry(req);
+  const candidates = await searchAlbums(`${title} ${artist}`.trim(), country).catch(() => []);
+  for (const candidate of candidates.slice(0, 5)) {
+    if (!albumMetadataMatchesInput(candidate, title, artist)) continue;
+    const lookup = await lookupAlbum(candidate.providerId, country).catch(() => null);
+    const tracks = sanitizeTracks(lookup?.tracks);
+    if (tracks.length) {
+      return {
+        ...albumInput,
+        artist: albumInput?.artist || lookup.artist || '',
+        coverUrl: albumInput?.coverUrl || albumInput?.cover_url || lookup.coverUrl || '',
+        tracks
+      };
+    }
+  }
+
+  return albumInput;
 }
 
 function findAlbumInList(listId, title, artist) {
@@ -2230,7 +2323,7 @@ function buildListAlbumPayload(list, user, album, access) {
       : null;
   const personalAverage = user ? userAlbumAverage(user.id, album.album_key) : null;
   const tracks = db
-    .prepare('SELECT * FROM album_tracks WHERE list_album_id = ? ORDER BY position, id')
+    .prepare('SELECT * FROM album_tracks WHERE list_album_id = ? ORDER BY disc_number, position, id, track_key')
     .all(album.id)
     .map((track) => {
       const userRating = user
@@ -2246,6 +2339,7 @@ function buildListAlbumPayload(list, user, album, access) {
       return {
         id: track.id,
         title: track.title,
+        discNumber: track.disc_number || 1,
         position: track.position,
         trackKey: track.track_key,
         userRating: userRating
@@ -2489,12 +2583,28 @@ function buildUserProfile(username, viewer) {
       const fullyListened = userAlbumFullyListened(profileUser.id, album.album_key, album.completed_at);
       const ratings = db
         .prepare(
-          `SELECT track_key, track_title, rating, include_in_average, updated_at
-           FROM track_ratings
-           WHERE user_id = ? AND album_key = ?
-           ORDER BY track_key = ? DESC, track_title COLLATE NOCASE`
+          `WITH track_order AS (
+             SELECT at.track_key,
+                    MIN(at.disc_number) AS disc_number,
+                    MIN(at.position) AS position,
+                    MIN(at.id) AS stable_id
+             FROM album_tracks at
+             JOIN list_albums la ON la.id = at.list_album_id
+             WHERE la.album_key = ?
+             GROUP BY at.track_key
+           )
+           SELECT r.track_key, r.track_title, r.rating, r.include_in_average, r.updated_at
+           FROM track_ratings r
+           LEFT JOIN track_order ord ON ord.track_key = r.track_key
+           WHERE r.user_id = ? AND r.album_key = ?
+           ORDER BY r.track_key = ? DESC,
+                    COALESCE(ord.disc_number, 999),
+                    COALESCE(ord.position, 9999),
+                    COALESCE(ord.stable_id, r.id),
+                    r.track_title COLLATE NOCASE,
+                    r.track_key`
         )
-        .all(profileUser.id, album.album_key, albumLevelTrackKey)
+        .all(album.album_key, profileUser.id, album.album_key, albumLevelTrackKey)
         .map((rating) => ({
           trackKey: rating.track_key,
           trackTitle: rating.track_title,
@@ -3224,7 +3334,6 @@ app.post(
 
     const body = clampText(req.body?.body, 2000);
     if (body.length < 10) throw httpError(400, 'Tell us a little more about the bug.');
-    if (body.split(/\s+/).filter(Boolean).length < 3) throw httpError(400, 'Tell us a little more about the bug.');
 
     const urlCount = (body.match(/https?:\/\/|www\./gi) || []).length;
     if (urlCount > 2) throw httpError(400, 'Bug reports can include at most two links.');
@@ -3512,17 +3621,18 @@ app.post(
 
 app.post(
   '/api/lists/:id/albums/copy',
-  route((req, res) => {
+  route(async (req, res) => {
     const user = requireUser(req);
     limitDbWrite(req, 'album-write');
     const list = getListOrThrow(Number(req.params.id));
     assertCanEdit(list, user);
-    const title = clampText(req.body?.title, 160);
+    const albumInput = await hydrateAlbumInputTracks(req.body, req);
+    const title = clampText(albumInput?.title, 160);
     if (!title) throw httpError(400, 'Album title is required.');
-    const artist = clampText(req.body?.artist, 160);
+    const artist = clampText(albumInput?.artist, 160);
     const existing = findAlbumInList(list.id, title, artist);
     if (existing) {
-      updateExistingAlbumFromInput(existing, req.body, list.id);
+      updateExistingAlbumFromInput(existing, albumInput, list.id);
       res.json({
         copied: false,
         albumId: existing.id,
@@ -3535,7 +3645,7 @@ app.post(
     }
 
     const albumId = transaction(() => {
-      const id = insertAlbum(list.id, user.id, req.body);
+      const id = insertAlbum(list.id, user.id, albumInput);
       db.prepare('UPDATE lists SET updated_at = ? WHERE id = ?').run(nowIso(), list.id);
       return id;
     })();
@@ -3564,7 +3674,7 @@ app.post(
 
     const force = req.body?.force === true;
     const currentCoverUrl = safeExternalImageUrl(album.cover_url);
-    const currentStillWorks = !force && currentCoverUrl ? true : false;
+    const currentStillWorks = !force && currentCoverUrl ? await imageUrlWorks(currentCoverUrl) : false;
     const refreshedCoverUrl = currentStillWorks
       ? currentCoverUrl
       : await resolveVerifiedAlbumCover(album.title, album.artist, itunesCountry(req), force ? [currentCoverUrl, req.body?.brokenUrl] : []);
@@ -4015,12 +4125,28 @@ app.get(
           aggregate: albumRatingAggregate(completion.album_key),
           myRatings: db
             .prepare(
-              `SELECT track_key, track_title, rating, include_in_average, updated_at
-               FROM track_ratings
-               WHERE user_id = ? AND album_key = ?
-               ORDER BY track_key = ? DESC, track_title COLLATE NOCASE`
+              `WITH track_order AS (
+                 SELECT at.track_key,
+                        MIN(at.disc_number) AS disc_number,
+                        MIN(at.position) AS position,
+                        MIN(at.id) AS stable_id
+                 FROM album_tracks at
+                 JOIN list_albums la ON la.id = at.list_album_id
+                 WHERE la.album_key = ?
+                 GROUP BY at.track_key
+               )
+               SELECT r.track_key, r.track_title, r.rating, r.include_in_average, r.updated_at
+               FROM track_ratings r
+               LEFT JOIN track_order ord ON ord.track_key = r.track_key
+               WHERE r.user_id = ? AND r.album_key = ?
+               ORDER BY r.track_key = ? DESC,
+                        COALESCE(ord.disc_number, 999),
+                        COALESCE(ord.position, 9999),
+                        COALESCE(ord.stable_id, r.id),
+                        r.track_title COLLATE NOCASE,
+                        r.track_key`
             )
-            .all(owner.id, completion.album_key, albumLevelTrackKey)
+            .all(completion.album_key, owner.id, completion.album_key, albumLevelTrackKey)
             .map((rating) => ({
               trackKey: rating.track_key,
               trackTitle: rating.track_title,
