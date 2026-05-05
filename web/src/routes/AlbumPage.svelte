@@ -130,10 +130,14 @@
   </main>
 {:else if payload}
   {@const a = album}
-  {@const averagePill = a.aggregate?.average !== null && a.aggregate?.average !== undefined ? `${a.aggregate.average}/10` : 'No average'}
+  {@const turntableAverage = a.aggregate?.average !== null && a.aggregate?.average !== undefined ? `Turntable average ${a.aggregate.average}/10` : ''}
+  {@const sharedAverage = a.sharedAggregate?.average !== null && a.sharedAggregate?.average !== undefined ? `Shared list average ${a.sharedAggregate.average}/10` : ''}
+  {@const yourRating = a.currentUserAggregate?.count ? `Your rating ${a.currentUserAggregate.average}/10` : ''}
   {@const libraryLabel = a.currentUserLibrary
-    ? a.currentUserLibrary.ratingCount
-      ? `Your ${a.currentUserLibrary.average}/10`
+    ? yourRating
+      ? 'In your list'
+      : a.currentUserLibrary.ratingCount
+      ? `Your rating ${a.currentUserLibrary.average}/10`
       : 'In your list'
     : ''}
   <main class="page-shell detail-shell">
@@ -144,7 +148,15 @@
         <h1>{a.title}</h1>
         <p>{a.artist || 'Unknown artist'}</p>
         <div class="button-row left">
-          <span class="pill">{averagePill}</span>
+          {#if yourRating}
+            <span class="pill done">{yourRating}</span>
+          {/if}
+          {#if sharedAverage}
+            <span class="pill">{sharedAverage}</span>
+          {/if}
+          {#if turntableAverage}
+            <span class="pill">{turntableAverage}</span>
+          {/if}
           {#if a.externalUrl}
             <a class="pill link-pill" href={a.externalUrl} target="_blank" rel="noreferrer">Open</a>
           {/if}
@@ -192,7 +204,9 @@
           <div class="track-row album-rating-row">
             <div>
               <strong>Album rating</strong>
-              <span>Track list unavailable - {averagePill}</span>
+              <span>Track list unavailable.</span>
+              {#if sharedAverage}<span>{sharedAverage}</span>{/if}
+              {#if turntableAverage}<span>{turntableAverage}</span>{/if}
               {#if albumError}<span class="error-line">{albumError}</span>{/if}
             </div>
             <RatingRow current={a.currentUserAlbumRating?.rating ?? null} disabled={albumBusy} onpick={rateAlbum} />
@@ -200,6 +214,22 @@
         </div>
       {:else}
         <div class="empty-minimal small">Track list unavailable.</div>
+      {/if}
+      {#if a.ratingsByUser.length}
+        <section class="readonly-ratings">
+          <h2>Shared list ratings</h2>
+          <div class="track-list">
+            {#each a.ratingsByUser as rating (`${rating.userId}:${rating.trackKey}`)}
+              <div class="track-row readonly-rating-row">
+                <div>
+                  <strong>{rating.username}</strong>
+                  <span>{rating.trackTitle || 'Album rating'}</span>
+                </div>
+                <span class="pill">{rating.rating}/10</span>
+              </div>
+            {/each}
+          </div>
+        </section>
       {/if}
     </div>
   </main>

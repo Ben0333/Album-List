@@ -16,7 +16,14 @@
   let rowError = $state<string>('');
 
   const average = $derived(
-    track.aggregate?.average !== null && track.aggregate?.average !== undefined ? `${track.aggregate.average}/10` : ''
+    track.aggregate?.average !== null && track.aggregate?.average !== undefined
+      ? `Turntable average ${track.aggregate.average}/10`
+      : ''
+  );
+  const sharedAverage = $derived(
+    track.sharedAggregate?.average !== null && track.sharedAggregate?.average !== undefined
+      ? `Shared list average ${track.sharedAggregate.average}/10`
+      : ''
   );
   const excluded = $derived(Boolean(track.userRating && !track.userRating.includeInAverage));
   const hasRating = $derived(Boolean(track.userRating));
@@ -63,6 +70,7 @@
   <div class="track-head">
     <div>
       <strong>{track.position}. {track.title}</strong>
+      {#if sharedAverage}<span>{sharedAverage}</span>{/if}
       {#if average}<span>{average}</span>{/if}
       {#if excluded}<span>Excluded from your average</span>{/if}
       {#if rowError}<span class="error-line">{rowError}</span>{/if}

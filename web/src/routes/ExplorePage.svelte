@@ -61,7 +61,7 @@
 
   function albumStatus(album: ExploreAlbum): string {
     if (album.currentUserCompleted) return 'Listened';
-    if (album.currentUserRatingCount) return `Your ${album.currentUserRatingAverage}/10`;
+    if (album.currentUserRatingCount) return `Your rating ${album.currentUserRatingAverage}/10`;
     return '';
   }
 
@@ -88,6 +88,14 @@
     if (list.listenCount) parts.push(`${list.listenCount} listens`);
     return parts.join(' • ');
   }
+  function openPopularList(list: PopularList): void {
+    if (list.shareToken) {
+      navigate(`/share/${encodeURIComponent(list.shareToken)}`);
+      return;
+    }
+    navigate(`/list/${list.id}`);
+  }
+
   async function shuffleExplore(currentSlug?: string): Promise<void> {
     if (shuffleBusy) return;
     shuffleBusy = true;
@@ -200,7 +208,7 @@
           {#each indexData.popularLists as list (list.id)}
             <article class="album-item">
               <div class="album-line">
-                <button class="album-title" onclick={() => navigate(`/share/${list.shareToken}`)}>
+                <button class="album-title" onclick={() => openPopularList(list)}>
                   <strong>{list.name}</strong>
                   <span>by {list.ownerUsername} - {listSummary(list)}</span>
                 </button>

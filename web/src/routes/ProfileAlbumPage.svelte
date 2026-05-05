@@ -81,7 +81,7 @@
   </main>
 {:else if profile}
   {@const a = album}
-  {@const averageLabel = a.average === null ? 'No average' : `${a.average}/10`}
+  {@const ratingLabel = a.average === null ? '' : `${ownProfile ? 'Your rating' : `${profile.user.username}'s rating`} ${a.average}/10`}
   <main class="page-shell detail-shell">
     <IconButton icon="arrow-left" label="Back" className="text-button back-link" onclick={back} />
     <section class="album-hero">
@@ -90,7 +90,7 @@
         <h1>{a.title}</h1>
         <p>{a.artist || 'Unknown artist'}</p>
         <div class="button-row left">
-          <span class="pill">{averageLabel}</span>
+          {#if ratingLabel}<span class="pill done">{ratingLabel}</span>{/if}
           {#if a.inCommon}<span class="pill done">In common</span>{/if}
           {#if a.fullyListened}
             <span class="pill done">Listened</span>
