@@ -106,6 +106,7 @@ export interface AlbumTrack {
   trackKey: string;
   userRating: TrackRating | null;
   aggregate: { average: number | null; count: number } | null;
+  sharedAggregate: { average: number | null; count: number } | null;
 }
 
 export interface AlbumLibraryRef {
@@ -134,11 +135,13 @@ export interface ListAlbum {
   currentUserCompleted: boolean;
   currentUserAverageOptIn: boolean;
   currentUserAlbumRating: TrackRating | null;
+  currentUserAggregate: { average: number | null; count: number } | null;
   currentUserRemovalVoted: boolean;
   removalVoteCount: number;
   removalVoteThreshold: number;
   currentUserLibrary: AlbumLibraryRef | null;
   aggregate: { average: number | null; count: number } | null;
+  sharedAggregate: { average: number | null; count: number } | null;
   ratingsByUser: Array<{
     userId: number;
     username: string;

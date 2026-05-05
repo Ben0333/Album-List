@@ -52,8 +52,9 @@
   });
 
   function albumSubtitle(album: ProfileAlbum): string {
-    const average = album.average === null ? 'No average' : `${album.average}/10`;
-    const parts = [album.artist || 'Unknown artist', average];
+    const rating = album.average === null || !profile ? '' : `${profile.user.username}'s rating ${album.average}/10`;
+    const parts = [album.artist || 'Unknown artist'];
+    if (rating) parts.push(rating);
     if (!album.fullyListened) parts.push('not finished');
     if (album.inCommon) parts.push('in common');
     return parts.join(' - ');

@@ -22,15 +22,16 @@
     const artist = album.artist || 'Unknown artist';
     const average =
       album.aggregate?.average !== null && album.aggregate?.average !== undefined
-        ? `${album.aggregate.average}/10`
+        ? `Turntable average ${album.aggregate.average}/10`
         : '';
     return average ? `${artist} - ${average}` : artist;
   });
 
   const libraryLabel: string = $derived.by(() => {
+    if (album.currentUserAggregate?.count) return `Your rating ${album.currentUserAggregate.average}/10`;
     if (!album.currentUserLibrary) return '';
     return album.currentUserLibrary.ratingCount
-      ? `Your ${album.currentUserLibrary.average}/10`
+      ? `Your rating ${album.currentUserLibrary.average}/10`
       : 'In your list';
   });
 

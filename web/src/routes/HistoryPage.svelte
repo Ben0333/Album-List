@@ -50,7 +50,9 @@
   function rowSubtitle(item: HistoryCompletion): string {
     const artist = item.artist || 'Unknown artist';
     const average =
-      item.aggregate?.average !== null && item.aggregate?.average !== undefined ? `${item.aggregate.average}/10` : '';
+      item.aggregate?.average !== null && item.aggregate?.average !== undefined
+        ? `Turntable average ${item.aggregate.average}/10`
+        : '';
     return average ? `${artist} - ${average}` : artist;
   }
 </script>
@@ -61,7 +63,7 @@
   <Placeholder title="Could not load history" note={loadError} />
 {:else if focused && history}
   {@const item = focused}
-  {@const average = item.aggregate?.average !== null && item.aggregate?.average !== undefined ? `${item.aggregate.average}/10` : 'No average'}
+  {@const average = item.aggregate?.average !== null && item.aggregate?.average !== undefined ? `Turntable average ${item.aggregate.average}/10` : ''}
   <main class="page-shell detail-shell">
     <IconButton icon="arrow-left" label="Back" className="text-button back-link" onclick={back} />
     <section class="album-hero">
@@ -70,7 +72,7 @@
         <h1>{item.title}</h1>
         <p>{item.artist || 'Unknown artist'}</p>
         <div class="button-row left">
-          <span class="pill">{average}</span>
+          {#if average}<span class="pill">{average}</span>{/if}
           <span class="pill done">Listened</span>
         </div>
       </div>

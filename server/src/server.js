@@ -2052,6 +2052,30 @@ function albumRatingAggregate(albumKeyValue, trackKeyValue = null) {
   };
 }
 
+function sharedListRatingAggregate(listId, albumKeyValue, trackKeyValue = null) {
+  const whereTrack = trackKeyValue ? 'AND r.track_key = ?' : '';
+  const params = trackKeyValue ? [listId, albumKeyValue, trackKeyValue] : [listId, albumKeyValue];
+  const row = db
+    .prepare(
+      `SELECT AVG(r.rating) AS average_rating, COUNT(*) AS rating_count
+       FROM track_ratings r
+       JOIN list_members rating_member
+         ON rating_member.list_id = ? AND rating_member.user_id = r.user_id
+       LEFT JOIN album_average_opt_in opt
+         ON opt.user_id = r.user_id AND opt.album_key = r.album_key
+       WHERE r.album_key = ?
+         ${whereTrack}
+         AND r.include_in_average = 1
+         AND COALESCE(opt.include_in_average, 1) = 1`
+    )
+    .get(...params);
+
+  return {
+    average: row.average_rating === null ? null : Math.round(row.average_rating * 10) / 10,
+    count: row.rating_count || 0
+  };
+}
+
 function userAlbumAverage(userId, albumKeyValue) {
   const row = db
     .prepare(
@@ -2308,6 +2332,10 @@ function buildListSummaryPayload(list, access, albumCount) {
   );
 }
 
+function canSeeNamedRatings(list, user, access) {
+  return Boolean(user && list.show_ratings && list.kind === 'collab' && access.isMember);
+}
+
 function buildListAlbumPayload(list, user, album, access) {
   const personalAlbum =
     user && list.kind !== 'personal'
@@ -2322,6 +2350,8 @@ function buildListAlbumPayload(list, user, album, access) {
           .get(user.id, album.album_key)
       : null;
   const personalAverage = user ? userAlbumAverage(user.id, album.album_key) : null;
+  const currentUserAggregate = user ? userAlbumAverage(user.id, album.album_key) : null;
+  const showNamedRatings = canSeeNamedRatings(list, user, access);
   const tracks = db
     .prepare('SELECT * FROM album_tracks WHERE list_album_id = ? ORDER BY disc_number, position, id, track_key')
     .all(album.id)
@@ -2349,7 +2379,8 @@ function buildListAlbumPayload(list, user, album, access) {
               updatedAt: userRating.updated_at
             }
           : null,
-        aggregate: list.show_ratings ? albumRatingAggregate(album.album_key, track.track_key) : null
+        aggregate: list.show_ratings ? albumRatingAggregate(album.album_key, track.track_key) : null,
+        sharedAggregate: showNamedRatings ? sharedListRatingAggregate(list.id, album.album_key, track.track_key) : null
       };
     });
 
@@ -2381,7 +2412,7 @@ function buildListAlbumPayload(list, user, album, access) {
     : null;
 
   const ratingsByUser =
-    list.show_ratings && access.isMember
+    showNamedRatings
       ? db
           .prepare(
             `SELECT r.user_id, u.username, u.avatar_color, u.avatar_data_url, r.track_key, r.track_title, r.rating, r.include_in_average, r.updated_at
@@ -2389,9 +2420,10 @@ function buildListAlbumPayload(list, user, album, access) {
              JOIN list_members rating_member ON rating_member.list_id = ? AND rating_member.user_id = r.user_id
              JOIN users u ON u.id = r.user_id
              WHERE r.album_key = ?
+               AND r.user_id != ?
              ORDER BY u.username COLLATE NOCASE, r.track_title COLLATE NOCASE`
           )
-          .all(list.id, album.album_key)
+          .all(list.id, album.album_key, user.id)
           .map((rating) => ({
             userId: rating.user_id,
             username: rating.username,
@@ -2430,6 +2462,7 @@ function buildListAlbumPayload(list, user, album, access) {
           updatedAt: albumLevelRating.updated_at
         }
       : null,
+    currentUserAggregate,
     currentUserRemovalVoted,
     removalVoteCount,
     removalVoteThreshold,
@@ -2442,6 +2475,7 @@ function buildListAlbumPayload(list, user, album, access) {
         }
       : null,
     aggregate: list.show_ratings ? albumRatingAggregate(album.album_key) : null,
+    sharedAggregate: showNamedRatings ? sharedListRatingAggregate(list.id, album.album_key) : null,
     ratingsByUser
   };
 }
@@ -2786,19 +2820,23 @@ function popularSharedLists(limit = 8) {
         COUNT(DISTINCT members.user_id) AS member_count,
         COUNT(DISTINCT ac.user_id || ':' || ac.list_album_id) AS listen_count
        FROM lists l
-       JOIN users owner ON owner.id = l.owner_user_id
+       JOIN users owner ON owner.id = l.owner_user_id AND owner.disabled_at IS NULL
        JOIN list_members lm ON lm.list_id = l.id AND lm.user_id = l.owner_user_id
        LEFT JOIN list_albums la ON la.list_id = l.id
        LEFT JOIN list_members members ON members.list_id = l.id
        LEFT JOIN album_completions ac ON ac.list_album_id = la.id
-       WHERE l.visibility = 'public'
+       WHERE l.kind = 'collab'
+         AND l.visibility = 'public'
+         AND l.share_token IS NOT NULL
+         AND l.share_token != ''
        GROUP BY l.id
+       HAVING COUNT(DISTINCT la.id) > 0
        ORDER BY member_count DESC, listen_count DESC, album_count DESC, l.updated_at DESC
        LIMIT ?`
     )
     .all(limit)
     .map((row) => ({
-      ...formatListSummary(row),
+      ...formatListSummary(row, { includeShareToken: true }),
       listenCount: row.listen_count || 0
     }));
 }
@@ -3123,14 +3161,18 @@ app.post(
   route((req, res) => {
     checkAuthThrottle(req);
     const { username, email, password, musicPlatform } = validateAccountInput(req.body || {});
-    const passwordHash = bcrypt.hashSync(password, 12);
     const normalizedUsername = normalizeText(username);
     const normalizedEmail = normalizeEmail(email);
 
-    const exists = db
-      .prepare('SELECT 1 FROM users WHERE username_normalized = ? OR email_normalized = ?')
-      .get(normalizedUsername, normalizedEmail);
-    if (exists) throw httpError(409, 'That username or email is unavailable.');
+    const usernameExists = db.prepare('SELECT 1 FROM users WHERE username_normalized = ?').get(normalizedUsername);
+    const emailExists = db.prepare('SELECT 1 FROM users WHERE email_normalized = ?').get(normalizedEmail);
+    if (usernameExists && emailExists) {
+      throw httpError(409, 'That username is already taken. That email is already in use.');
+    }
+    if (usernameExists) throw httpError(409, 'That username is already taken.');
+    if (emailExists) throw httpError(409, 'That email is already in use.');
+
+    const passwordHash = bcrypt.hashSync(password, 12);
 
     const tx = transaction(() => {
       const info = db
