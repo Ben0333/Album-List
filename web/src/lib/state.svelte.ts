@@ -3,6 +3,7 @@ import type { GuestState, InviteSummary, ListPayload, ListSummary, ThemePreferen
 const GUEST_KEY = 'albums_guest_v2';
 const OLD_GUEST_KEY = 'albums_guest_v1';
 const THEME_KEY = 'albums_theme_preference_v1';
+const RETRO_UNLOCK_KEY = 'albums_retro_theme_unlocked_v1';
 
 function loadGuest(): GuestState {
   for (const key of [GUEST_KEY, OLD_GUEST_KEY]) {
@@ -22,6 +23,10 @@ function loadThemePreference(): ThemePreference {
   const stored = localStorage.getItem(THEME_KEY);
   if (stored === 'light' || stored === 'dark' || stored === 'retro' || stored === 'system') return stored;
   return 'system';
+}
+
+function loadRetroThemeUnlocked(): boolean {
+  return localStorage.getItem(RETRO_UNLOCK_KEY) === 'unlocked' || localStorage.getItem(THEME_KEY) === 'retro';
 }
 
 const CHAT_OPEN_KEY = 'albums_chat_open_v1';
@@ -47,6 +52,7 @@ export interface AppState {
   invites: InviteSummary[];
   guest: GuestState;
   themePreference: ThemePreference;
+  retroThemeUnlocked: boolean;
   authMode: 'login' | 'register';
   selectedPlatform: 'spotify' | 'youtube_music' | 'apple_music' | 'tidal' | 'soundcloud' | 'bandcamp' | 'deezer' | 'na';
   notice: string;
@@ -71,6 +77,7 @@ export const appState: AppState = $state({
   invites: [],
   guest: loadGuest(),
   themePreference: loadThemePreference(),
+  retroThemeUnlocked: loadRetroThemeUnlocked(),
   authMode: 'login',
   selectedPlatform: 'na',
   notice: '',
@@ -94,6 +101,11 @@ export function persistChatReadIds(): void {
 
 export function persistTheme(theme: ThemePreference): void {
   localStorage.setItem(THEME_KEY, theme);
+}
+
+export function persistRetroThemeUnlocked(unlocked: boolean): void {
+  if (unlocked) localStorage.setItem(RETRO_UNLOCK_KEY, 'unlocked');
+  else localStorage.removeItem(RETRO_UNLOCK_KEY);
 }
 
 export function persistGuest(): void {

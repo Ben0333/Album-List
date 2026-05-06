@@ -1,12 +1,16 @@
 <script lang="ts">
-  import { appState, persistTheme } from '$lib/state.svelte';
+  import { appState, persistRetroThemeUnlocked, persistTheme } from '$lib/state.svelte';
   import { applyTheme, nextTheme, themeIconName } from '$lib/theme';
   import { router, navigate } from '$lib/router.svelte';
   import { api } from '$lib/api';
   import IconButton from './IconButton.svelte';
+  import Icon from './Icon.svelte';
   import Avatar from './Avatar.svelte';
 
+  const retroHoldMs = 15000;
   const onExploreClick = () => navigate(router.current.type === 'explore' ? '/' : '/explore');
+  let retroHoldTimer: number | null = null;
+  let retroHoldTriggered = false;
 
   function goHome(): void {
     const personal = appState.lists.find((list) => list.kind === 'personal') ?? appState.lists[0];
@@ -19,18 +23,50 @@
   }
 
   async function cycleTheme(): Promise<void> {
-    const next = nextTheme(appState.themePreference);
-    appState.themePreference = next;
-    persistTheme(next);
-    applyTheme(next);
+    const next = nextTheme(appState.themePreference, appState.retroThemeUnlocked);
+    await setTheme(next);
+  }
+
+  async function setTheme(theme: typeof appState.themePreference): Promise<void> {
+    appState.themePreference = theme;
+    persistTheme(theme);
+    applyTheme(theme);
     if (appState.user) {
       try {
-        const data = await api.patch<{ user: typeof appState.user }>('/api/me', { themePreference: next });
+        const data = await api.patch<{ user: typeof appState.user }>('/api/me', { themePreference: theme });
         appState.user = data.user;
       } catch {
         // Silent: theme still applied locally.
       }
     }
+  }
+
+  function cancelRetroHold(): void {
+    if (retroHoldTimer !== null) {
+      window.clearTimeout(retroHoldTimer);
+      retroHoldTimer = null;
+    }
+  }
+
+  function beginRetroHold(): void {
+    cancelRetroHold();
+    retroHoldTriggered = false;
+    retroHoldTimer = window.setTimeout(() => {
+      retroHoldTimer = null;
+      retroHoldTriggered = true;
+      appState.retroThemeUnlocked = true;
+      persistRetroThemeUnlocked(true);
+      void setTheme('retro');
+      appState.notice = '90s theme unlocked.';
+    }, retroHoldMs);
+  }
+
+  function themeClick(): void {
+    if (retroHoldTriggered) {
+      retroHoldTriggered = false;
+      return;
+    }
+    void cycleTheme();
   }
 </script>
 
@@ -39,12 +75,19 @@
 </div>
 
 <div class="utility-bar">
-  <IconButton
-    icon={themeIconName(appState.themePreference)}
-    label="Theme"
-    className="icon-button"
-    onclick={cycleTheme}
-  />
+  <button
+    class="icon-button icon-text-button"
+    title="Theme"
+    type="button"
+    onclick={themeClick}
+    onpointerdown={beginRetroHold}
+    onpointerup={cancelRetroHold}
+    onpointercancel={cancelRetroHold}
+    onpointerleave={cancelRetroHold}
+  >
+    <Icon name={themeIconName(appState.themePreference)} />
+    <span class="button-label">Theme</span>
+  </button>
   <IconButton
     icon={router.current.type === 'explore' ? 'list' : 'compass'}
     label={router.current.type === 'explore' ? 'My lists' : 'Explore'}

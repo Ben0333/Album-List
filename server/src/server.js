@@ -39,6 +39,7 @@ const exploreCoverMemoryCache = new Map();
 const albumSearchMemoryCache = new Map();
 const albumLookupMemoryCache = new Map();
 const albumLevelTrackKey = '__album__';
+const hiddenExploreSlugs = new Set(['before-you-die', 'modern-classics', 'hip-hop-foundations', 'famous-band-essentials']);
 const maxAlbumsPerList = 500;
 const metadataUserAgent = `AlbumsToListenTo/0.1 (${config.appOrigin})`;
 const metadataCacheMaxEntries = 250;
@@ -2137,6 +2138,55 @@ function userAlbumFullyListened(userId, albumKeyValue, knownCompletedAt = null) 
   );
 }
 
+function userAlbumFullyRated(userId, albumKeyValue, listAlbumId = null) {
+  const trackCount = listAlbumId
+    ? db.prepare('SELECT COUNT(*) AS count FROM album_tracks WHERE list_album_id = ?').get(listAlbumId).count
+    : db
+        .prepare(
+          `SELECT COUNT(*) AS count
+           FROM album_tracks at
+           JOIN list_albums la ON la.id = at.list_album_id
+           WHERE la.album_key = ?`
+        )
+        .get(albumKeyValue).count;
+
+  if (trackCount > 0) {
+    const ratedCount = listAlbumId
+      ? db
+          .prepare(
+            `SELECT COUNT(DISTINCT at.track_key) AS count
+             FROM album_tracks at
+             JOIN track_ratings tr
+               ON tr.user_id = ?
+              AND tr.album_key = ?
+              AND tr.track_key = at.track_key
+             WHERE at.list_album_id = ?`
+          )
+          .get(userId, albumKeyValue, listAlbumId).count
+      : db
+          .prepare(
+            `SELECT COUNT(DISTINCT tr.track_key) AS count
+             FROM track_ratings tr
+             WHERE tr.user_id = ?
+               AND tr.album_key = ?
+               AND tr.track_key != ?`
+          )
+          .get(userId, albumKeyValue, albumLevelTrackKey).count;
+    return ratedCount >= trackCount;
+  }
+
+  return Boolean(
+    db
+      .prepare(
+        `SELECT 1
+         FROM track_ratings
+         WHERE user_id = ? AND album_key = ? AND track_key = ?
+         LIMIT 1`
+      )
+      .get(userId, albumKeyValue, albumLevelTrackKey)
+  );
+}
+
 function upsertUserAlbumActivity(userId, album, values = {}) {
   const completedAt = values.completedAt === undefined ? null : values.completedAt;
   const ratedAt = values.ratedAt === undefined ? null : values.ratedAt;
@@ -2454,6 +2504,7 @@ function buildListAlbumPayload(list, user, album, access) {
     completions,
     pendingMembers,
     currentUserCompleted: Boolean(user && completedIds.has(user.id)),
+    currentUserFullyRated: Boolean(user && userAlbumFullyRated(user.id, album.album_key, album.id)),
     currentUserAverageOptIn: optInRow ? Boolean(optInRow.include_in_average) : true,
     currentUserAlbumRating: albumLevelRating
       ? {
@@ -2675,6 +2726,10 @@ function buildUserProfile(username, viewer) {
 
 function exploreListBySlug(slug) {
   return exploreLists.find((item) => item.slug === slug);
+}
+
+function visibleExploreLists() {
+  return exploreLists.filter((list) => !hiddenExploreSlugs.has(list.slug));
 }
 
 function exploreAlbumStatuses(user) {
@@ -3007,7 +3062,7 @@ app.get(
 app.get('/api/explore', (req, res) => {
   cachePublic(res, 60, 300);
   res.json({
-    lists: exploreLists.map(({ albums, ...list }) => list),
+    lists: visibleExploreLists().map(({ albums, ...list }) => list),
     popularLists: popularSharedLists()
   });
 });
@@ -3015,7 +3070,10 @@ app.get('/api/explore', (req, res) => {
 app.get(
   '/api/explore/random',
   route((req, res) => {
-    const source = req.query.slug ? exploreListBySlug(String(req.query.slug)) : exploreLists[Math.floor(Math.random() * exploreLists.length)];
+    const publicExploreLists = visibleExploreLists();
+    const source = req.query.slug
+      ? exploreListBySlug(String(req.query.slug))
+      : publicExploreLists[Math.floor(Math.random() * publicExploreLists.length)];
     if (!source) throw httpError(404, 'Explore list not found.');
     if (!source.albums.length) throw httpError(404, 'Explore list has no albums.');
     const albumIndex = Math.floor(Math.random() * source.albums.length);

@@ -20,12 +20,12 @@
   let saving = $state<boolean>(false);
   let modalError = $state<string>('');
 
-  const themes: Array<[ThemePreference, string]> = [
+  const visibleThemes: Array<[ThemePreference, string]> = $derived([
     ['system', 'System'],
     ['light', 'Light'],
     ['dark', 'Dark'],
-    ['retro', '90s']
-  ];
+    ...(appState.retroThemeUnlocked ? ([['retro', '90s']] as Array<[ThemePreference, string]>) : [])
+  ]);
 
   const platforms: Array<[MusicPlatform, string]> = [
     ['spotify', 'Spotify'],
@@ -141,7 +141,7 @@
       <div>
         <span class="label">Theme</span>
         <div class="segmented">
-          {#each themes as [value, label] (value)}
+          {#each visibleThemes as [value, label] (value)}
             <button type="button" class:active={appState.themePreference === value} onclick={() => setTheme(value)}>
               {label}
             </button>

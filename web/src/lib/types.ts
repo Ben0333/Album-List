@@ -133,6 +133,7 @@ export interface ListAlbum {
   completions: AlbumCompletion[];
   pendingMembers: Member[];
   currentUserCompleted: boolean;
+  currentUserFullyRated: boolean;
   currentUserAverageOptIn: boolean;
   currentUserAlbumRating: TrackRating | null;
   currentUserAggregate: { average: number | null; count: number } | null;
