@@ -1538,9 +1538,34 @@ function albumSearchQualityScore(album) {
   return score;
 }
 
+function albumProviderSearchKey(album) {
+  const provider = String(album.provider || '').trim();
+  const providerId = String(album.providerId || '').trim();
+  if (!provider || !providerId) return '';
+  return `${provider}:${providerId}`;
+}
+
+function bestAlbumSearchCandidate(left, right) {
+  const leftQuality = albumSearchQualityScore(left);
+  const rightQuality = albumSearchQualityScore(right);
+  if (leftQuality !== rightQuality) return leftQuality > rightQuality ? left : right;
+  const leftScore = Number(left.score || 0);
+  const rightScore = Number(right.score || 0);
+  if (leftScore !== rightScore) return leftScore > rightScore ? left : right;
+  return String(left.artist || '').length <= String(right.artist || '').length ? left : right;
+}
+
 function collapseAlbumSearchResults(results) {
-  const groups = new Map();
+  const byProviderId = new Map();
   for (const album of results.filter((item) => item.title)) {
+    const providerKey = albumProviderSearchKey(album);
+    if (!providerKey) continue;
+    const existing = byProviderId.get(providerKey);
+    byProviderId.set(providerKey, existing ? bestAlbumSearchCandidate(existing, album) : album);
+  }
+
+  const groups = new Map();
+  for (const album of byProviderId.values()) {
     const key = compactAlbumIdentity(album.title, album.artist) || album.releaseGroupId || `${album.provider}:${album.providerId}`;
     const group = groups.get(key);
     if (group) group.push(album);
