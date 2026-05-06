@@ -674,6 +674,12 @@ h1 {
   padding: 8px 10px;
 }
 
+.album-line > .completion,
+.album-line > .pill,
+.album-line > .icon-text-button {
+  flex: 0 0 auto;
+}
+
 .album-title {
   min-width: 0;
   flex: 1;
@@ -1595,6 +1601,24 @@ label span {
     gap: 10px;
   }
 
+  .album-line .cover {
+    width: 50px;
+    height: 50px;
+    flex-basis: 50px;
+  }
+
+  .album-line .completion .avatar {
+    display: none;
+  }
+
+  .album-line .completion {
+    flex: 0 0 auto;
+  }
+
+  .album-line .pill {
+    white-space: nowrap;
+  }
+
   .explore-shell .album-line {
     gap: 8px;
     padding: 8px;
@@ -1627,10 +1651,6 @@ label span {
     width: 76px;
     height: 76px;
     flex-basis: 76px;
-  }
-
-  .completion {
-    display: none;
   }
 
   .album-details {

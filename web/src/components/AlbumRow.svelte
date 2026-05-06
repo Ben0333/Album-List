@@ -28,11 +28,10 @@
   });
 
   const libraryLabel: string = $derived.by(() => {
-    if (album.currentUserAggregate?.count) return `Your rating ${album.currentUserAggregate.average}/10`;
-    if (!album.currentUserLibrary) return '';
-    return album.currentUserLibrary.ratingCount
-      ? `Your rating ${album.currentUserLibrary.average}/10`
-      : 'In your list';
+    if (album.currentUserFullyRated && album.currentUserAggregate?.count) {
+      return `${album.currentUserAggregate.average}/10`;
+    }
+    return album.currentUserLibrary ? 'In your list' : '';
   });
 
   const isCollab = $derived(payload.list.kind === 'collab');

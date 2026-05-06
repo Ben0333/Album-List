@@ -2,7 +2,8 @@ import type { ThemePreference } from './types';
 
 const mediaDark = window.matchMedia('(prefers-color-scheme: dark)');
 
-const themeCycle: ThemePreference[] = ['system', 'dark', 'light', 'retro'];
+const normalThemeCycle: ThemePreference[] = ['system', 'dark', 'light'];
+const unlockedThemeCycle: ThemePreference[] = ['system', 'dark', 'light', 'retro'];
 
 export function applyTheme(preference: ThemePreference): void {
   const resolved = preference === 'system' ? (mediaDark.matches ? 'dark' : 'light') : preference;
@@ -15,8 +16,9 @@ export function applyAccent(color: string | null | undefined): void {
   document.documentElement.style.setProperty('--blue-strong', accent);
 }
 
-export function nextTheme(current: ThemePreference): ThemePreference {
-  return themeCycle[(themeCycle.indexOf(current) + 1) % themeCycle.length] ?? 'system';
+export function nextTheme(current: ThemePreference, retroUnlocked = false): ThemePreference {
+  const cycle = retroUnlocked ? unlockedThemeCycle : normalThemeCycle;
+  return cycle[(cycle.indexOf(current) + 1) % cycle.length] ?? 'system';
 }
 
 export function themeIconName(preference: ThemePreference): 'moon' | 'sun' | 'system' {

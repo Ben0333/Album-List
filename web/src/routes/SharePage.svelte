@@ -53,6 +53,9 @@
           <h1>{payload.list.name}</h1>
         </div>
       </div>
+      {#if payload.list.ownerUsername}
+        <p class="soft-line">{payload.list.name} by {payload.list.ownerUsername}</p>
+      {/if}
       {#if payload.list.description}
         <p class="soft-line">{payload.list.description}</p>
       {/if}
