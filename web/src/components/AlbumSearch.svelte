@@ -106,6 +106,10 @@
     suggestions = [];
     open = false;
   }
+
+  function suggestionKey(suggestion: Suggestion, index: number): string {
+    return `${suggestion.providerId || 'album'}:${index}`;
+  }
 </script>
 
 {#if enabled}
@@ -136,7 +140,7 @@
         {:else if !suggestions.length}
           <div class="suggestion-empty">No albums found.</div>
         {:else}
-          {#each suggestions as suggestion (suggestion.providerId)}
+          {#each suggestions as suggestion, index (suggestionKey(suggestion, index))}
             <button
               type="button"
               class="suggestion"
