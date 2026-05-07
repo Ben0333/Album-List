@@ -52,6 +52,15 @@ let lastMusicBrainzRequestAt = 0;
 app.disable('x-powered-by');
 app.set('trust proxy', config.trustProxy);
 
+app.use((req, res, next) => {
+  if (!config.isProduction || req.secure || isLocalRequestHost(req)) {
+    next();
+    return;
+  }
+
+  res.redirect(308, `${config.appOrigin}${req.originalUrl || '/'}`);
+});
+
 app.use(
   helmet({
     contentSecurityPolicy: {
@@ -72,7 +81,7 @@ app.use(
     crossOriginEmbedderPolicy: false,
     hsts: config.isProduction
       ? {
-          maxAge: 15552000,
+          maxAge: 31536000,
           includeSubDomains: true,
           preload: false
         }
@@ -126,6 +135,13 @@ function parsePositiveInteger(value, fallback, { min = 1, max = Number.MAX_SAFE_
   const parsed = Number(value || fallback);
   if (!Number.isInteger(parsed) || parsed < min || parsed > max) return fallback;
   return parsed;
+}
+
+function isLocalRequestHost(req) {
+  const host = String(req.get('host') || '').trim().toLowerCase();
+  const endBracket = host.startsWith('[') ? host.indexOf(']') : -1;
+  const hostname = endBracket > -1 ? host.slice(1, endBracket) : host.split(':')[0];
+  return hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '::1';
 }
 
 function rateLimitError(message, retryAfterSeconds) {

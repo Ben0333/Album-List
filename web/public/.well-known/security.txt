@@ -1,0 +1,4 @@
+Contact: https://turntable.graves.com.br/
+Expires: 2027-05-07T00:00:00Z
+Canonical: https://turntable.graves.com.br/.well-known/security.txt
+Preferred-Languages: en
