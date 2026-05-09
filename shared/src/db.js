@@ -187,6 +187,25 @@ db.exec(`
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
   );
 
+  CREATE TABLE IF NOT EXISTS album_metadata_cache (
+    album_key TEXT PRIMARY KEY,
+    title TEXT NOT NULL,
+    artist TEXT NOT NULL DEFAULT '',
+    cover_url TEXT NOT NULL DEFAULT '',
+    source TEXT NOT NULL DEFAULT '',
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+  );
+
+  CREATE TABLE IF NOT EXISTS album_track_cache (
+    album_key TEXT NOT NULL,
+    track_key TEXT NOT NULL,
+    title TEXT NOT NULL,
+    disc_number INTEGER NOT NULL DEFAULT 1,
+    position INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (album_key, track_key)
+  );
+
   CREATE TABLE IF NOT EXISTS admin_action_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     action TEXT NOT NULL CHECK (action IN ('disable', 'enable', 'anonymize', 'report_status', 'database_backup')),
@@ -221,6 +240,8 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_list_albums_album_updated ON list_albums(album_key, updated_at);
   CREATE INDEX IF NOT EXISTS idx_list_invites_invitee ON list_invites(invitee_user_id, status);
   CREATE INDEX IF NOT EXISTS idx_album_cover_cache_updated ON album_cover_cache(updated_at);
+  CREATE INDEX IF NOT EXISTS idx_album_metadata_cache_updated ON album_metadata_cache(updated_at);
+  CREATE INDEX IF NOT EXISTS idx_album_track_cache_album ON album_track_cache(album_key, disc_number, position);
   CREATE UNIQUE INDEX IF NOT EXISTS idx_list_invites_one_pending
     ON list_invites(list_id, invitee_user_id)
     WHERE status = 'pending';

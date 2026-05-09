@@ -9981,6 +9981,514 @@ const rawExploreLists = [
       ]
   },
   {
+      "slug": "modern-counterculture",
+      "name": "Modern Counterculture",
+      "description": "Music with teeth! A modern counterculture collection.",
+      "sourceUrl": "",
+      "albums": [
+          [
+              "Diaspora Problems",
+              "Soul Glo",
+              null
+          ],
+          [
+              "Bob Vylan Presents The Price of Life",
+              "Bob Vylan",
+              null
+          ],
+          [
+              "Supernova",
+              "Nova Twins",
+              null
+          ],
+          [
+              "I Got Heaven",
+              "Mannequin Pussy",
+              null
+          ],
+          [
+              "How Flowers Grow",
+              "Scowl",
+              null
+          ],
+          [
+              "Who Let the Dogs Out",
+              "Lambrini Girls",
+              null
+          ],
+          [
+              "Year of the Snake",
+              "Softcult",
+              null
+          ],
+          [
+              "Love Me Forever",
+              "Pinkshift",
+              null
+          ],
+          [
+              "Comfort to Me",
+              "Amyl and the Sniffers",
+              null
+          ],
+          [
+              "Fuck These Fuckin Fascists",
+              "The Muslims",
+              null
+          ],
+          [
+              "Songs to Yeet at the Sun",
+              "Soul Glo",
+              null
+          ],
+          [
+              "The Nigga in Me Is Me",
+              "Soul Glo",
+              null
+          ],
+          [
+              "Untitled LP",
+              "Soul Glo",
+              null
+          ],
+          [
+              "We Live Here",
+              "Bob Vylan",
+              null
+          ],
+          [
+              "Humble as the Sun",
+              "Bob Vylan",
+              null
+          ],
+          [
+              "Who Are the Girls?",
+              "Nova Twins",
+              null
+          ],
+          [
+              "Parasites & Butterflies",
+              "Nova Twins",
+              null
+          ],
+          [
+              "Patience",
+              "Mannequin Pussy",
+              null
+          ],
+          [
+              "Romantic",
+              "Mannequin Pussy",
+              null
+          ],
+          [
+              "Are We All Angels",
+              "Scowl",
+              null
+          ],
+          [
+              "Psychic Dance Routine",
+              "Scowl",
+              null
+          ],
+          [
+              "You\u2019re Welcome",
+              "Lambrini Girls",
+              null
+          ],
+          [
+              "Saccharine",
+              "Pinkshift",
+              null
+          ],
+          [
+              "Earthkeeper",
+              "Pinkshift",
+              null
+          ],
+          [
+              "Year of the Rat",
+              "Softcult",
+              null
+          ],
+          [
+              "Heaven",
+              "Softcult",
+              null
+          ],
+          [
+              "When a Flower Doesn\u2019t Grow",
+              "Softcult",
+              null
+          ],
+          [
+              "The Muslims",
+              "The Muslims",
+              null
+          ],
+          [
+              "Mayo Supreme",
+              "The Muslims",
+              null
+          ],
+          [
+              "Gentrified Chicken",
+              "The Muslims",
+              null
+          ],
+          [
+              "Inshallah: Tomorrow We Inherit the Earth",
+              "The Muslims",
+              null
+          ],
+          [
+              "Growing Up",
+              "The Linda Lindas",
+              null
+          ],
+          [
+              "No Obligation",
+              "The Linda Lindas",
+              null
+          ],
+          [
+              "Open Mouth, Open Heart",
+              "Destroy Boys",
+              null
+          ],
+          [
+              "Letter to Self",
+              "SPRINTS",
+              null
+          ],
+          [
+              "All That Is Over",
+              "SPRINTS",
+              null
+          ],
+          [
+              "Anti-Fun Propaganda",
+              "Gen and the Degenerates",
+              null
+          ],
+          [
+              "Past // Present // Future",
+              "Meet Me @ The Altar",
+              null
+          ],
+          [
+              "Ultrasound",
+              "The Oozes",
+              null
+          ],
+          [
+              "The Mess We Seem to Make",
+              "Crawlers",
+              null
+          ],
+          [
+              "Cartoon Darkness",
+              "Amyl and the Sniffers",
+              null
+          ],
+          [
+              "Plastic",
+              "Upchuck",
+              null
+          ],
+          [
+              "viagr aboys",
+              "Viagra Boys",
+              null
+          ],
+          [
+              "Cave World",
+              "Viagra Boys",
+              null
+          ],
+          [
+              "Welfare Jazz",
+              "Viagra Boys",
+              null
+          ],
+          [
+              "NEVER ENOUGH",
+              "Turnstile",
+              null
+          ],
+          [
+              "GLOW ON",
+              "Turnstile",
+              null
+          ],
+          [
+              "TANGK",
+              "IDLES",
+              null
+          ],
+          [
+              "CRAWLER",
+              "IDLES",
+              null
+          ],
+          [
+              "Joy as an Act of Resistance",
+              "IDLES",
+              null
+          ],
+          [
+              "Cool World",
+              "Chat Pile",
+              null
+          ],
+          [
+              "God\u2019s Country",
+              "Chat Pile",
+              null
+          ],
+          [
+              "Passion Of",
+              "Special Interest",
+              null
+          ],
+          [
+              "Endure",
+              "Special Interest",
+              null
+          ],
+          [
+              "Wonderful Hell",
+              "War on Women",
+              null
+          ],
+          [
+              "Capture the Flag",
+              "War on Women",
+              null
+          ],
+          [
+              "Deep Sage",
+              "Gouge Away",
+              null
+          ],
+          [
+              "Burnt Sugar",
+              "Gouge Away",
+              null
+          ],
+          [
+              "Only Constant",
+              "Gel",
+              null
+          ],
+          [
+              "A New Tomorrow",
+              "Zulu",
+              null
+          ],
+          [
+              "Post-American",
+              "MSPAINT",
+              null
+          ],
+          [
+              "Life Under the Gun",
+              "Militarie Gun",
+              null
+          ],
+          [
+              "Games of Power",
+              "Home Front",
+              null
+          ],
+          [
+              "Watch It Die",
+              "Home Front",
+              null
+          ],
+          [
+              "Spiritual Cramp",
+              "Spiritual Cramp",
+              null
+          ],
+          [
+              "RUDE",
+              "Spiritual Cramp",
+              null
+          ],
+          [
+              "Who Will Look After the Dogs?",
+              "PUP",
+              null
+          ],
+          [
+              "Morbid Stuff",
+              "PUP",
+              null
+          ],
+          [
+              "At Peace",
+              "Propagandhi",
+              null
+          ],
+          [
+              "Failed States",
+              "Propagandhi",
+              null
+          ],
+          [
+              "Formal Growth in the Desert",
+              "Protomartyr",
+              null
+          ],
+          [
+              "Ultimate Success Today",
+              "Protomartyr",
+              null
+          ],
+          [
+              "THE FUTURE IS HERE AND EVERYTHING NEEDS TO BE DESTROYED",
+              "The Armed",
+              null
+          ],
+          [
+              "ULTRAPOP",
+              "The Armed",
+              null
+          ],
+          [
+              "Perfect Saviors",
+              "The Armed",
+              null
+          ],
+          [
+              "Darker White",
+              "Fever 333",
+              null
+          ],
+          [
+              "STRENGTH IN NUMB333RS",
+              "Fever 333",
+              null
+          ],
+          [
+              "Billy Nomates",
+              "Billy Nomates",
+              null
+          ],
+          [
+              "CACTI",
+              "Billy Nomates",
+              null
+          ],
+          [
+              "All of Us Flames",
+              "Ezra Furman",
+              null
+          ],
+          [
+              "Life on Earth",
+              "Hurray for the Riff Raff",
+              null
+          ],
+          [
+              "The Past Is Still Alive",
+              "Hurray for the Riff Raff",
+              null
+          ],
+          [
+              "Funeral for Justice",
+              "Mdou Moctar",
+              null
+          ],
+          [
+              "Hostile Architecture",
+              "Ashenspire",
+              null
+          ],
+          [
+              "To Know the Light",
+              "Dawn Ray\u2019d",
+              null
+          ],
+          [
+              "Visions of Bodies Being Burned",
+              "clipping.",
+              null
+          ],
+          [
+              "There Existed an Addiction to Blood",
+              "clipping.",
+              null
+          ],
+          [
+              "RTJ4",
+              "Run the Jewels",
+              null
+          ],
+          [
+              "NEGRO",
+              "Pink Siifu",
+              null
+          ],
+          [
+              "Integrated Tech Solutions",
+              "Aesop Rock",
+              null
+          ],
+          [
+              "The Collective",
+              "Kim Gordon",
+              null
+          ],
+          [
+              "All Born Screaming",
+              "St. Vincent",
+              null
+          ],
+          [
+              "You Heartbreaker, You",
+              "Jehnny Beth",
+              null
+          ],
+          [
+              "Fairyland Codex",
+              "Tropical Fuck Storm",
+              null
+          ],
+          [
+              "Deep States",
+              "Tropical Fuck Storm",
+              null
+          ],
+          [
+              "Getting Killed",
+              "Geese",
+              null
+          ],
+          [
+              "45 Pounds",
+              "YHWH Nailgun",
+              null
+          ],
+          [
+              "Hot Shock",
+              "HotWax",
+              null
+          ],
+          [
+              "Raspberry Moon",
+              "Hotline TNT",
+              null
+          ],
+          [
+              "Goodbye Sal\u00f2",
+              "Brutalismus 3000",
+              null
+          ]
+      ]
+  },
+  {
       "slug": "famous-band-essentials",
       "name": "Famous Band Essentials",
       "description": "A no-overthinking starter route through widely referenced albums by major bands.",

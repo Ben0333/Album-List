@@ -130,7 +130,6 @@
     });
   }
 
-  const pathPrefix = $derived(payload ? `/list/${payload.list.id}` : '');
   const canShare = $derived(
     payload ? payload.list.visibility !== 'private' || payload.permissions.canManage : false
   );
@@ -221,7 +220,6 @@
               {album}
               payload={payload}
               highlighted={highlightAlbumId === album.id}
-              {pathPrefix}
               onPayloadUpdate={(next) => (payload = next)}
             />
           {/each}

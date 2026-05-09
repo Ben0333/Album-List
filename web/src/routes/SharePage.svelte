@@ -65,7 +65,7 @@
             <AlbumRow
               {album}
               {payload}
-              pathPrefix={pathPrefix}
+              openPath={`${pathPrefix}/album/${album.id}`}
               onPayloadUpdate={(next) => (payload = next)}
             />
           {/each}

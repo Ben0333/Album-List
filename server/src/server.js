@@ -1776,12 +1776,20 @@ async function albumCoverCandidates(title, artist, country = 'US') {
   );
 }
 
-function cachedAlbumCover(title, artist) {
+function cachedAlbumCoverValue(title, artist) {
   const key = albumKey(title, artist);
   if (!key) return '';
   const row = db.prepare('SELECT cover_url FROM album_cover_cache WHERE album_key = ?').get(key);
   const cached = safeExternalImageUrl(row?.cover_url);
   if (cached) return cached;
+  return '';
+}
+
+function cachedAlbumCover(title, artist) {
+  const cached = cachedAlbumCoverValue(title, artist);
+  if (cached) return cached;
+  const key = albumKey(title, artist);
+  if (!key) return '';
   const metadata = albumMetadata(key);
   const metadataCover = safeExternalImageUrl(metadata.cover_url);
   if (metadataCover) return saveAlbumCover(metadata.title || title, metadata.artist || artist, metadataCover, 'album-metadata');
@@ -1803,6 +1811,65 @@ function saveAlbumCover(title, artist, coverUrl, source = '') {
        updated_at = excluded.updated_at`
   ).run(key, clampText(title, 160), clampText(artist, 160), safeCoverUrl, clampText(source, 80), nowIso());
   return safeCoverUrl;
+}
+
+function cachedAlbumMetadata(albumKeyValue) {
+  return db
+    .prepare('SELECT title, artist, cover_url FROM album_metadata_cache WHERE album_key = ?')
+    .get(albumKeyValue);
+}
+
+function saveCanonicalAlbumMetadata(albumInput, source = '') {
+  const title = clampText(albumInput?.title, 160);
+  if (!title) return '';
+  const artist = clampText(albumInput?.artist, 160);
+  const key = albumKey(title, artist);
+  if (!key) return '';
+  const coverUrl = safeExternalImageUrl(albumInput?.coverUrl || albumInput?.cover_url);
+  db.prepare(
+    `INSERT INTO album_metadata_cache (album_key, title, artist, cover_url, source, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?)
+     ON CONFLICT(album_key) DO UPDATE SET
+       title = excluded.title,
+       artist = excluded.artist,
+       cover_url = CASE
+         WHEN excluded.cover_url != '' THEN excluded.cover_url
+         ELSE album_metadata_cache.cover_url
+       END,
+       source = excluded.source,
+       updated_at = excluded.updated_at`
+  ).run(key, title, artist, coverUrl, clampText(source, 80), nowIso());
+  if (coverUrl) saveAlbumCover(title, artist, coverUrl, source);
+  return key;
+}
+
+function cachedTracksForAlbumKey(albumKeyValue) {
+  return db
+    .prepare(
+      `SELECT track_key AS trackKey, title, disc_number AS discNumber, position
+       FROM album_track_cache
+       WHERE album_key = ?
+       ORDER BY disc_number, position, rowid, track_key`
+    )
+    .all(albumKeyValue);
+}
+
+function saveCanonicalAlbumTracks(albumInput, source = '') {
+  const key = saveCanonicalAlbumMetadata(albumInput, source);
+  if (!key) return;
+  const tracks = sanitizeTracks(albumInput?.tracks);
+  if (!tracks.length) return;
+  transaction(() => {
+    db.prepare('DELETE FROM album_track_cache WHERE album_key = ?').run(key);
+    const insertTrack = db.prepare(
+      `INSERT INTO album_track_cache (album_key, track_key, title, disc_number, position, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?)`
+    );
+    const updatedAt = nowIso();
+    for (const track of tracks) {
+      insertTrack.run(key, track.trackKey, track.title, track.discNumber || 1, track.position, updatedAt);
+    }
+  })();
 }
 
 async function resolveVerifiedAlbumCover(title, artist, country = 'US', excludedUrls = []) {
@@ -1853,6 +1920,7 @@ function insertAlbum(listId, userId, albumInput) {
   for (const track of tracks) {
     insertTrack.run(info.lastInsertRowid, track.trackKey, track.title, track.discNumber || 1, track.position);
   }
+  saveCanonicalAlbumTracks({ title, artist, coverUrl, tracks }, 'list-album');
 
   return Number(info.lastInsertRowid);
 }
@@ -1934,6 +2002,16 @@ function updateExistingAlbumFromInput(existing, albumInput, listId) {
       changed = true;
     }
 
+    saveCanonicalAlbumTracks(
+      {
+        title: existing.title,
+        artist: artist || existing.artist || '',
+        coverUrl: coverUrl || safeExternalImageUrl(existing.cover_url),
+        tracks
+      },
+      'list-album'
+    );
+
     if (changed) {
       db.prepare('UPDATE lists SET updated_at = ? WHERE id = ?').run(nowIso(), listId);
     }
@@ -1953,7 +2031,7 @@ function existingTracksForAlbumKey(albumKeyValue) {
        LIMIT 1`
     )
     .get(albumKeyValue);
-  if (!source) return [];
+  if (!source) return cachedTracksForAlbumKey(albumKeyValue);
 
   return db
     .prepare(
@@ -1976,6 +2054,22 @@ function albumMetadataMatchesInput(candidate, title, artist) {
   return candidateArtist === targetArtist || candidateArtist.includes(targetArtist) || targetArtist.includes(candidateArtist);
 }
 
+async function albumLookupCandidatesForInput(title, artist, country) {
+  const queries = uniqueBy(
+    [
+      `${artist} ${title}`.trim(),
+      `${title} ${artist}`.trim(),
+      title
+    ].filter((query) => query.length >= 2),
+    (query) => normalizeText(query)
+  );
+  const settled = await Promise.allSettled(queries.map((query) => searchAlbums(query, country)));
+  return uniqueBy(
+    settled.flatMap((result) => (result.status === 'fulfilled' ? result.value : [])),
+    (album) => albumProviderSearchKey(album) || compactAlbumIdentity(album.title, album.artist)
+  );
+}
+
 async function hydrateAlbumInputTracks(albumInput, req) {
   if (sanitizeTracks(albumInput?.tracks).length) return albumInput;
 
@@ -1988,7 +2082,7 @@ async function hydrateAlbumInputTracks(albumInput, req) {
 
   limitAlbumLookup(req);
   const country = itunesCountry(req);
-  const candidates = await searchAlbums(`${title} ${artist}`.trim(), country).catch(() => []);
+  const candidates = await albumLookupCandidatesForInput(title, artist, country).catch(() => []);
   for (const candidate of candidates.slice(0, 5)) {
     if (!albumMetadataMatchesInput(candidate, title, artist)) continue;
     const lookup = await lookupAlbum(candidate.providerId, country).catch(() => null);
@@ -2769,6 +2863,14 @@ function exploreListBySlug(slug) {
   return exploreLists.find((item) => item.slug === slug);
 }
 
+function exploreAlbumSourceByKey(albumKeyValue) {
+  for (const list of exploreLists) {
+    const index = list.albums.findIndex((album) => albumKey(album.title, album.artist) === albumKeyValue);
+    if (index >= 0) return { list, album: list.albums[index], index };
+  }
+  return null;
+}
+
 function visibleExploreLists() {
   return exploreLists.filter((list) => !hiddenExploreSlugs.has(list.slug));
 }
@@ -2805,7 +2907,63 @@ function exploreAlbumStatuses(user) {
     statuses.set(row.album_key, current);
   }
 
+  for (const row of db
+    .prepare(
+      `SELECT album_key, rating, include_in_average, updated_at
+       FROM track_ratings
+       WHERE user_id = ? AND track_key = ?`
+    )
+    .all(user.id, albumLevelTrackKey)) {
+    const current = statuses.get(row.album_key) || { completed: false, average: null, ratingCount: 0 };
+    current.albumRating = {
+      rating: row.rating,
+      includeInAverage: Boolean(row.include_in_average),
+      updatedAt: row.updated_at
+    };
+    statuses.set(row.album_key, current);
+  }
+
   return statuses;
+}
+
+function canonicalCoverMapForAlbumKeys(albumKeys) {
+  const covers = new Map();
+  const uniqueKeys = [...new Set(albumKeys.filter(Boolean))];
+  for (let index = 0; index < uniqueKeys.length; index += 500) {
+    const chunk = uniqueKeys.slice(index, index + 500);
+    const placeholders = chunk.map(() => '?').join(',');
+    for (const row of db
+      .prepare(`SELECT album_key, cover_url FROM album_cover_cache WHERE album_key IN (${placeholders})`)
+      .all(...chunk)) {
+      const coverUrl = safeExternalImageUrl(row.cover_url);
+      if (coverUrl) covers.set(row.album_key, coverUrl);
+    }
+    for (const row of db
+      .prepare(`SELECT album_key, cover_url FROM album_metadata_cache WHERE album_key IN (${placeholders})`)
+      .all(...chunk)) {
+      const coverUrl = safeExternalImageUrl(row.cover_url);
+      if (coverUrl) covers.set(row.album_key, coverUrl);
+    }
+  }
+  return covers;
+}
+
+function exploreAlbumPayload(album, index, statuses, cachedCovers, canonicalCovers) {
+  const key = albumKey(album.title, album.artist);
+  const status = statuses.get(key);
+  return {
+    ...album,
+    albumKey: key,
+    coverUrl:
+      safeExternalImageUrl(album.coverUrl) ||
+      safeExternalImageUrl(cachedCovers.get(index)) ||
+      safeExternalImageUrl(canonicalCovers.get(key)) ||
+      '',
+    currentUserCompleted: Boolean(status?.completed),
+    currentUserAlbumRating: status?.albumRating ?? null,
+    currentUserRatingAverage: status?.average ?? null,
+    currentUserRatingCount: status?.ratingCount ?? 0
+  };
 }
 
 function exploreListWithCachedCovers(list, user = null) {
@@ -2816,20 +2974,10 @@ function exploreListWithCachedCovers(list, user = null) {
       .map((row) => [row.album_index, safeExternalImageUrl(row.cover_url)])
   );
   const statuses = exploreAlbumStatuses(user);
+  const canonicalCovers = canonicalCoverMapForAlbumKeys(list.albums.map((album) => albumKey(album.title, album.artist)));
   return {
     ...list,
-    albums: list.albums.map((album, index) => {
-      const key = albumKey(album.title, album.artist);
-      const status = statuses.get(key);
-      return {
-        ...album,
-        albumKey: key,
-        coverUrl: safeExternalImageUrl(album.coverUrl) || safeExternalImageUrl(cached.get(index)) || '',
-        currentUserCompleted: Boolean(status?.completed),
-        currentUserRatingAverage: status?.average ?? null,
-        currentUserRatingCount: status?.ratingCount ?? 0
-      };
-    })
+    albums: list.albums.map((album, index) => exploreAlbumPayload(album, index, statuses, cached, canonicalCovers))
   };
 }
 
@@ -2893,7 +3041,7 @@ async function resolveExploreCover(slug, albumIndex, album, options = {}) {
   const candidates = [];
   const spotifyCover = await spotifyAlbumCover(album.spotifyId);
   if (spotifyCover) candidates.push(spotifyCover);
-  const results = await searchAlbums(`${album.title} ${album.artist}`, 'US').catch(() => []);
+  const results = await albumLookupCandidatesForInput(album.title, album.artist, 'US').catch(() => []);
   const exact = results.find(
     (item) => normalizeText(item.title).includes(normalizeText(album.title)) && normalizeText(item.artist).includes(normalizeText(album.artist))
   );
@@ -2904,6 +3052,271 @@ async function resolveExploreCover(slug, albumIndex, album, options = {}) {
   saveExploreCover(slug, albumIndex, album, coverUrl);
   if (!coverUrl && force) clearExploreCover(slug, albumIndex);
   return coverUrl;
+}
+
+function listAlbumsForAlbumKey(albumKeyValue) {
+  return db.prepare('SELECT * FROM list_albums WHERE album_key = ? ORDER BY updated_at DESC, id DESC').all(albumKeyValue);
+}
+
+function dbAlbumMetadata(albumKeyValue) {
+  const activity = db
+    .prepare(
+      `SELECT title, artist, cover_url
+       FROM user_album_activity
+       WHERE album_key = ? AND (title != '' OR artist != '' OR cover_url != '')
+       ORDER BY updated_at DESC
+       LIMIT 1`
+    )
+    .get(albumKeyValue);
+  if (activity) return activity;
+
+  const cached = cachedAlbumMetadata(albumKeyValue);
+  if (cached) return cached;
+
+  return db
+    .prepare(
+      `SELECT title, artist, cover_url
+       FROM list_albums
+       WHERE album_key = ?
+       ORDER BY updated_at DESC
+       LIMIT 1`
+    )
+    .get(albumKeyValue);
+}
+
+function sourceAlbumMetadata(albumKeyValue) {
+  const metadata = dbAlbumMetadata(albumKeyValue);
+  if (metadata) return metadata;
+
+  const source = exploreAlbumSourceByKey(albumKeyValue);
+  if (source) {
+    return {
+      title: source.album.title,
+      artist: source.album.artist || '',
+      cover_url:
+        safeExternalImageUrl(source.album.coverUrl) ||
+        cachedExploreCover(source.list.slug, source.index) ||
+        cachedAlbumCoverValue(source.album.title, source.album.artist)
+    };
+  }
+
+  return null;
+}
+
+function viewerAlbumMetadata(albumKeyValue, user) {
+  const source = exploreAlbumSourceByKey(albumKeyValue);
+  if (source) {
+    const cached = cachedAlbumMetadata(albumKeyValue);
+    return {
+      title: source.album.title,
+      artist: source.album.artist || '',
+      cover_url:
+        safeExternalImageUrl(source.album.coverUrl) ||
+        safeExternalImageUrl(cached?.cover_url) ||
+        cachedExploreCover(source.list.slug, source.index) ||
+        cachedAlbumCoverValue(source.album.title, source.album.artist)
+    };
+  }
+
+  if (user) {
+    const activity = db
+      .prepare(
+        `SELECT title, artist, cover_url
+         FROM user_album_activity
+         WHERE user_id = ? AND album_key = ? AND (title != '' OR artist != '' OR cover_url != '')
+         ORDER BY updated_at DESC
+         LIMIT 1`
+      )
+      .get(user.id, albumKeyValue);
+    if (activity) return activity;
+
+    const memberAlbum = db
+      .prepare(
+        `SELECT la.title, la.artist, la.cover_url
+         FROM list_albums la
+         JOIN list_members lm ON lm.list_id = la.list_id AND lm.user_id = ?
+         WHERE la.album_key = ?
+         ORDER BY la.updated_at DESC, la.id DESC
+         LIMIT 1`
+      )
+      .get(user.id, albumKeyValue);
+    if (memberAlbum) return memberAlbum;
+  }
+
+  return db
+    .prepare(
+      `SELECT la.title, la.artist, la.cover_url
+       FROM list_albums la
+       JOIN lists l ON l.id = la.list_id
+       WHERE la.album_key = ? AND l.visibility = 'public'
+       ORDER BY la.updated_at DESC, la.id DESC
+       LIMIT 1`
+    )
+    .get(albumKeyValue);
+}
+
+function syncHydratedAlbumToLists(albumInput) {
+  const title = clampText(albumInput?.title, 160);
+  if (!title) return;
+  const artist = clampText(albumInput?.artist, 160);
+  const key = albumKey(title, artist);
+  for (const album of listAlbumsForAlbumKey(key)) {
+    updateExistingAlbumFromInput(album, albumInput, album.list_id);
+  }
+}
+
+async function hydratedAlbumInputForKey(albumKeyValue, req) {
+  const metadata = viewerAlbumMetadata(albumKeyValue, req.user);
+  if (!metadata) throw httpError(404, 'Album not found.');
+
+  const title = clampText(metadata.title, 160);
+  if (!title || albumKey(title, metadata.artist || '') !== albumKeyValue) throw httpError(404, 'Album not found.');
+
+  const artist = clampText(metadata.artist, 160);
+  const source = exploreAlbumSourceByKey(albumKeyValue);
+  let coverUrl = safeExternalImageUrl(metadata.cover_url) || cachedAlbumCover(title, artist);
+  let tracks = existingTracksForAlbumKey(albumKeyValue);
+  let usedAlbumLookupRateLimit = false;
+
+  if (!coverUrl && source) {
+    limitExploreCoverLookup(req);
+    coverUrl = await resolveExploreCover(source.list.slug, source.index, source.album).catch(() => '');
+  }
+
+  if (!tracks.length) {
+    usedAlbumLookupRateLimit = true;
+    const hydrated = await hydrateAlbumInputTracks({ title, artist, coverUrl }, req);
+    tracks = sanitizeTracks(hydrated?.tracks);
+    coverUrl = safeExternalImageUrl(hydrated?.coverUrl || hydrated?.cover_url) || coverUrl;
+  }
+
+  if (!coverUrl) {
+    if (!usedAlbumLookupRateLimit) limitAlbumLookup(req);
+    coverUrl = await resolveVerifiedAlbumCover(title, artist).catch(() => '');
+  }
+
+  if (coverUrl) {
+    saveAlbumCover(title, artist, coverUrl, source ? `explore:${source.list.slug}` : 'album-detail');
+    if (source) saveExploreCover(source.list.slug, source.index, source.album, coverUrl);
+  }
+
+  const albumInput = { title, artist, coverUrl, tracks };
+  saveCanonicalAlbumTracks(albumInput, source ? `explore:${source.list.slug}` : 'album-detail');
+  syncHydratedAlbumToLists(albumInput);
+  return {
+    album_key: albumKeyValue,
+    title,
+    artist,
+    cover_url: coverUrl,
+    tracks
+  };
+}
+
+function trackPayloadForAlbum(albumKeyValue, track, index, user) {
+  const trackKeyValue = track.trackKey || track.track_key || trackKey(track.title, index + 1);
+  const userRating = user
+    ? db
+        .prepare(
+          `SELECT rating, include_in_average, updated_at
+           FROM track_ratings
+           WHERE user_id = ? AND album_key = ? AND track_key = ?`
+        )
+        .get(user.id, albumKeyValue, trackKeyValue)
+    : null;
+
+  return {
+    id: index + 1,
+    title: track.title,
+    discNumber: track.discNumber || track.disc_number || 1,
+    position: track.position || index + 1,
+    trackKey: trackKeyValue,
+    userRating: userRating
+      ? {
+          rating: userRating.rating,
+          includeInAverage: Boolean(userRating.include_in_average),
+          updatedAt: userRating.updated_at
+        }
+      : null,
+    aggregate: albumRatingAggregate(albumKeyValue, trackKeyValue),
+    sharedAggregate: null
+  };
+}
+
+function buildCanonicalAlbumPayload(album, user) {
+  const albumKeyValue = album.album_key;
+  const optInRow = user
+    ? db.prepare('SELECT include_in_average FROM album_average_opt_in WHERE user_id = ? AND album_key = ?').get(user.id, albumKeyValue)
+    : null;
+  const albumLevelRating = user
+    ? db
+        .prepare(
+          `SELECT rating, include_in_average, updated_at
+           FROM track_ratings
+           WHERE user_id = ? AND album_key = ? AND track_key = ?`
+        )
+        .get(user.id, albumKeyValue, albumLevelTrackKey)
+    : null;
+  const personalAlbum = user
+    ? db
+        .prepare(
+          `SELECT la.id, la.list_id
+           FROM list_albums la
+           JOIN lists l ON l.id = la.list_id
+           WHERE l.owner_user_id = ? AND l.kind = 'personal' AND la.album_key = ?
+           LIMIT 1`
+        )
+        .get(user.id, albumKeyValue)
+    : null;
+  const personalAverage = user ? userAlbumAverage(user.id, albumKeyValue) : null;
+  const currentUserAggregate = user ? userAlbumAverage(user.id, albumKeyValue) : null;
+
+  return {
+    albumKey: albumKeyValue,
+    title: album.title,
+    artist: album.artist || '',
+    coverUrl: safeExternalImageUrl(album.cover_url),
+    externalUrl: albumExternalUrl(album, user?.musicPlatform || 'na'),
+    tracks: album.tracks.map((track, index) => trackPayloadForAlbum(albumKeyValue, track, index, user)),
+    currentUserCompleted: Boolean(user && userAlbumFullyListened(user.id, albumKeyValue)),
+    currentUserFullyRated: Boolean(user && userAlbumFullyRated(user.id, albumKeyValue)),
+    currentUserAverageOptIn: optInRow ? Boolean(optInRow.include_in_average) : true,
+    currentUserAlbumRating: albumLevelRating
+      ? {
+          rating: albumLevelRating.rating,
+          includeInAverage: Boolean(albumLevelRating.include_in_average),
+          updatedAt: albumLevelRating.updated_at
+        }
+      : null,
+    currentUserAggregate,
+    currentUserLibrary: personalAlbum
+      ? {
+          listId: personalAlbum.list_id,
+          albumId: personalAlbum.id,
+          average: personalAverage.average,
+          ratingCount: personalAverage.count
+        }
+      : null,
+    aggregate: albumRatingAggregate(albumKeyValue)
+  };
+}
+
+function writeCanonicalRating(user, album, trackKeyValue, trackTitle, rating, include) {
+  transaction(() => {
+    const ratedAt = nowIso();
+    db.prepare(
+      `INSERT INTO track_ratings (user_id, album_key, track_key, track_title, rating, include_in_average, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(user_id, album_key, track_key) DO UPDATE
+       SET track_title = excluded.track_title,
+           rating = excluded.rating,
+           include_in_average = excluded.include_in_average,
+           updated_at = excluded.updated_at`
+    ).run(user.id, album.album_key, trackKeyValue, trackTitle, rating, include, ratedAt);
+    upsertUserAlbumActivity(user.id, album, {
+      ratedAt,
+      completedAt: userAlbumFullyListened(user.id, album.album_key) ? ratedAt : undefined
+    });
+  })();
 }
 
 function popularSharedLists(limit = 8) {
@@ -2938,27 +3351,7 @@ function popularSharedLists(limit = 8) {
 }
 
 function albumMetadata(albumKeyValue) {
-  const activity = db
-    .prepare(
-      `SELECT title, artist, cover_url
-       FROM user_album_activity
-       WHERE album_key = ? AND (title != '' OR artist != '' OR cover_url != '')
-       ORDER BY updated_at DESC
-       LIMIT 1`
-    )
-    .get(albumKeyValue);
-  if (activity) return activity;
-  return (
-    db
-      .prepare(
-        `SELECT title, artist, cover_url
-         FROM list_albums
-         WHERE album_key = ?
-         ORDER BY updated_at DESC
-         LIMIT 1`
-      )
-      .get(albumKeyValue) || { title: albumKeyValue, artist: '', cover_url: '' }
-  );
+  return sourceAlbumMetadata(albumKeyValue) || { title: albumKeyValue, artist: '', cover_url: '' };
 }
 
 function userKnownAlbumKeys(userId) {
@@ -3109,6 +3502,150 @@ app.get('/api/explore', (req, res) => {
 });
 
 app.get(
+  '/api/albums/by-key/:albumKey',
+  route(async (req, res) => {
+    const album = await hydratedAlbumInputForKey(req.params.albumKey, req);
+    res.setHeader('Cache-Control', req.user ? 'private, no-cache' : 'no-store');
+    res.json({ album: buildCanonicalAlbumPayload(album, req.user) });
+  })
+);
+
+app.post(
+  '/api/albums/by-key/:albumKey/complete',
+  route(async (req, res) => {
+    const user = requireUser(req);
+    limitDbWrite(req, 'completion-write');
+    const album = await hydratedAlbumInputForKey(req.params.albumKey, req);
+
+    if (req.body?.completed === false) {
+      transaction(() => {
+        db.prepare('UPDATE user_album_activity SET completed_at = NULL, updated_at = ? WHERE user_id = ? AND album_key = ?').run(
+          nowIso(),
+          user.id,
+          album.album_key
+        );
+        const rows = db
+          .prepare(
+            `SELECT ac.list_album_id
+             FROM album_completions ac
+             JOIN list_albums la ON la.id = ac.list_album_id
+             JOIN list_members lm ON lm.list_id = la.list_id AND lm.user_id = ac.user_id
+             WHERE ac.user_id = ? AND la.album_key = ?`
+          )
+          .all(user.id, album.album_key);
+        const removeCompletion = db.prepare('DELETE FROM album_completions WHERE list_album_id = ? AND user_id = ?');
+        for (const row of rows) removeCompletion.run(row.list_album_id, user.id);
+      })();
+    } else {
+      transaction(() => {
+        const completedAt = nowIso();
+        upsertUserAlbumActivity(user.id, album, { completedAt });
+        const rows = db
+          .prepare(
+            `SELECT la.id
+             FROM list_albums la
+             JOIN list_members lm ON lm.list_id = la.list_id AND lm.user_id = ?
+             WHERE la.album_key = ?`
+          )
+          .all(user.id, album.album_key);
+        const completeAlbum = db.prepare(
+          `INSERT INTO album_completions (list_album_id, user_id, completed_at)
+           VALUES (?, ?, ?)
+           ON CONFLICT(list_album_id, user_id) DO UPDATE SET completed_at = excluded.completed_at`
+        );
+        for (const row of rows) completeAlbum.run(row.id, user.id, completedAt);
+      })();
+    }
+
+    res.json({ ok: true, album: buildCanonicalAlbumPayload(album, user) });
+  })
+);
+
+app.patch(
+  '/api/albums/by-key/:albumKey/rating-preferences',
+  route(async (req, res) => {
+    const user = requireUser(req);
+    limitDbWrite(req, 'rating-write');
+    const album = await hydratedAlbumInputForKey(req.params.albumKey, req);
+    const include = req.body?.includeInAverage === false ? 0 : 1;
+    db.prepare(
+      `INSERT INTO album_average_opt_in (user_id, album_key, include_in_average, updated_at)
+       VALUES (?, ?, ?, ?)
+       ON CONFLICT(user_id, album_key) DO UPDATE
+       SET include_in_average = excluded.include_in_average, updated_at = excluded.updated_at`
+    ).run(user.id, album.album_key, include, nowIso());
+    res.json({ ok: true, album: buildCanonicalAlbumPayload(album, user) });
+  })
+);
+
+app.put(
+  '/api/albums/by-key/:albumKey/rating',
+  route(async (req, res) => {
+    const user = requireUser(req);
+    limitDbWrite(req, 'rating-write');
+    const album = await hydratedAlbumInputForKey(req.params.albumKey, req);
+    const rating = Number(req.body?.rating);
+    if (!Number.isInteger(rating) || rating < 0 || rating > 10) {
+      throw httpError(400, 'Rating must be a whole number from 0 to 10.');
+    }
+    const existingRating = db
+      .prepare('SELECT include_in_average FROM track_ratings WHERE user_id = ? AND album_key = ? AND track_key = ?')
+      .get(user.id, album.album_key, albumLevelTrackKey);
+    const include =
+      req.body?.includeInAverage === undefined ? existingRating?.include_in_average ?? 1 : req.body.includeInAverage === false ? 0 : 1;
+    writeCanonicalRating(user, album, albumLevelTrackKey, 'Album rating', rating, include);
+    res.json({ ok: true, album: buildCanonicalAlbumPayload(album, user) });
+  })
+);
+
+app.patch(
+  '/api/albums/by-key/:albumKey/tracks/:trackKey/rating-preferences',
+  route(async (req, res) => {
+    const user = requireUser(req);
+    limitDbWrite(req, 'rating-write');
+    const album = await hydratedAlbumInputForKey(req.params.albumKey, req);
+    const trackKeyValue = clampText(req.params.trackKey, 220);
+    const track = album.tracks.find((item, index) => (item.trackKey || trackKey(item.title, index + 1)) === trackKeyValue);
+    if (!track) throw httpError(404, 'Track not found.');
+    const existingRating = db
+      .prepare('SELECT id FROM track_ratings WHERE user_id = ? AND album_key = ? AND track_key = ?')
+      .get(user.id, album.album_key, trackKeyValue);
+    if (!existingRating) throw httpError(400, 'Rate this track before excluding it from album ratings.');
+    const include = req.body?.includeInAverage === false ? 0 : 1;
+    db.prepare(
+      `UPDATE track_ratings
+       SET include_in_average = ?, updated_at = ?
+       WHERE user_id = ? AND album_key = ? AND track_key = ?`
+    ).run(include, nowIso(), user.id, album.album_key, trackKeyValue);
+    res.json({ ok: true, album: buildCanonicalAlbumPayload(album, user) });
+  })
+);
+
+app.put(
+  '/api/albums/by-key/:albumKey/tracks/:trackKey/rating',
+  route(async (req, res) => {
+    const user = requireUser(req);
+    limitDbWrite(req, 'rating-write');
+    const album = await hydratedAlbumInputForKey(req.params.albumKey, req);
+    const trackKeyValue = clampText(req.params.trackKey, 220);
+    const track = album.tracks.find((item, index) => (item.trackKey || trackKey(item.title, index + 1)) === trackKeyValue);
+    if (!track) throw httpError(404, 'Track not found.');
+
+    const rating = Number(req.body?.rating);
+    if (!Number.isInteger(rating) || rating < 0 || rating > 10) {
+      throw httpError(400, 'Rating must be a whole number from 0 to 10.');
+    }
+    const existingRating = db
+      .prepare('SELECT include_in_average FROM track_ratings WHERE user_id = ? AND album_key = ? AND track_key = ?')
+      .get(user.id, album.album_key, trackKeyValue);
+    const include =
+      req.body?.includeInAverage === undefined ? existingRating?.include_in_average ?? 1 : req.body.includeInAverage === false ? 0 : 1;
+    writeCanonicalRating(user, album, trackKeyValue, track.title, rating, include);
+    res.json({ ok: true, album: buildCanonicalAlbumPayload(album, user) });
+  })
+);
+
+app.get(
   '/api/explore/random',
   route((req, res) => {
     const publicExploreLists = visibleExploreLists();
@@ -3131,6 +3668,44 @@ app.get(
     if (req.user) res.setHeader('Cache-Control', 'private, no-cache');
     else cachePublic(res, 120, 600);
     res.json({ list: exploreListWithCachedCovers(list, req.user) });
+  })
+);
+
+app.put(
+  '/api/explore/:slug/albums/:index/rating',
+  route(async (req, res) => {
+    const user = requireUser(req);
+    limitDbWrite(req, 'rating-write');
+    const list = exploreListBySlug(req.params.slug);
+    if (!list) throw httpError(404, 'Explore list not found.');
+    const index = Number(req.params.index);
+    if (!Number.isInteger(index) || index < 0 || index >= list.albums.length) {
+      throw httpError(404, 'Explore album not found.');
+    }
+
+    const sourceAlbum = list.albums[index];
+    const title = clampText(sourceAlbum.title, 160);
+    if (!title) throw httpError(400, 'Album title is required.');
+    const artist = clampText(sourceAlbum.artist, 160);
+    const key = albumKey(title, artist);
+    const rating = Number(req.body?.rating);
+    if (!Number.isInteger(rating) || rating < 0 || rating > 10) {
+      throw httpError(400, 'Rating must be a whole number from 0 to 10.');
+    }
+    const album = await hydratedAlbumInputForKey(key, req);
+
+    const existingRating = db
+      .prepare('SELECT include_in_average FROM track_ratings WHERE user_id = ? AND album_key = ? AND track_key = ?')
+      .get(user.id, album.album_key, albumLevelTrackKey);
+    const include =
+      req.body?.includeInAverage === undefined ? existingRating?.include_in_average ?? 1 : req.body.includeInAverage === false ? 0 : 1;
+    writeCanonicalRating(user, album, albumLevelTrackKey, 'Album rating', rating, include);
+
+    res.setHeader('Cache-Control', 'private, no-cache');
+    res.json({
+      ok: true,
+      album: exploreListWithCachedCovers(list, user).albums[index]
+    });
   })
 );
 
