@@ -134,6 +134,61 @@ label {
   justify-content: flex-end;
 }
 
+.live-status {
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid #dfe4ec;
+  border-radius: 999px;
+  background: #fff;
+  color: #3b4352;
+  font-size: 0.82rem;
+  font-weight: 800;
+  margin-top: 10px;
+  min-height: 28px;
+  padding: 4px 10px;
+}
+
+.admin-nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: -6px 0 18px;
+}
+
+.admin-nav a {
+  border: 1px solid #dfe4ec;
+  border-radius: 6px;
+  background: #fff;
+  color: #293241;
+  font-weight: 800;
+  padding: 9px 12px;
+  text-decoration: none;
+}
+
+.admin-nav a.active {
+  border-color: #171c26;
+  background: #171c26;
+  color: #fff;
+}
+
+.page-title {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.page-title h2 {
+  margin: 0;
+  font-size: 1.15rem;
+}
+
+.page-title span {
+  color: #687386;
+  font-size: 0.88rem;
+}
+
 .grid {
   display: grid;
   gap: 16px;
@@ -427,6 +482,10 @@ th {
     justify-content: flex-start;
   }
 
+  .page-title {
+    display: grid;
+  }
+
   .editor-grid {
     grid-template-columns: 1fr;
   }
@@ -449,6 +508,8 @@ th {
   .login-card,
   .panel,
   .stat,
+  .live-status,
+  .admin-nav a,
   .report-card,
   .playlist-card {
     border-color: #303744;
@@ -459,6 +520,16 @@ th {
   .danger-card {
     border-color: #6f2b27;
     background: #2a1818;
+  }
+
+  .admin-nav a {
+    color: #f2f4f8;
+  }
+
+  .admin-nav a.active {
+    border-color: #f2f4f8;
+    background: #f2f4f8;
+    color: #101318;
   }
 
   button.secondary {
@@ -485,6 +556,7 @@ th {
   .card-head small,
   .album-preview,
   .meta-line,
+  .page-title span,
   .stat small {
     color: #a7afbf;
   }

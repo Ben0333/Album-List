@@ -886,6 +886,15 @@ app.use(
   })
 );
 
+app.get('/admin/*', (req, res, next) => {
+  if (req.path.startsWith('/admin/api')) {
+    next();
+    return;
+  }
+  res.setHeader('Cache-Control', 'no-store');
+  res.sendFile(path.join(adminPublicDir, 'index.html'));
+});
+
 app.post(
   '/admin/api/login',
   route((req, res) => {
