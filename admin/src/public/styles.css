@@ -60,6 +60,10 @@ textarea {
   padding: 10px 11px;
 }
 
+input[type="checkbox"] {
+  width: auto;
+}
+
 textarea {
   min-height: 74px;
   resize: vertical;
@@ -135,6 +139,10 @@ label {
   gap: 16px;
 }
 
+.admin-stack {
+  margin-top: 16px;
+}
+
 .summary-grid {
   grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
 }
@@ -177,6 +185,49 @@ label {
 .stat b {
   display: block;
   font-size: 1.55rem;
+}
+
+.stat small {
+  display: block;
+  margin-top: 8px;
+  color: #687386;
+  line-height: 1.35;
+}
+
+.control-card {
+  display: grid;
+  gap: 10px;
+}
+
+.danger-card {
+  border-color: #f5b8b1;
+  background: #fff7f6;
+}
+
+.usage-bar {
+  overflow: hidden;
+  width: 100%;
+  height: 10px;
+  border-radius: 999px;
+  background: #e8ebf1;
+  margin-top: 10px;
+}
+
+.usage-bar i {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: #2563eb;
+}
+
+.toggle-row,
+.check-row {
+  display: flex;
+  align-items: center;
+  grid-auto-flow: column;
+  grid-template-columns: auto 1fr;
+  gap: 8px;
+  font-weight: 700;
 }
 
 .recent-signups {
@@ -277,22 +328,85 @@ th {
   padding: 10px 12px;
 }
 
-.report {
-  border-top: 1px solid #e8ebf1;
-  padding: 14px 0;
+.notice {
+  border: 1px solid #b7d6c2;
+  border-radius: 6px;
+  background: #effaf2;
+  color: #17643a;
+  margin-bottom: 16px;
+  padding: 10px 12px;
 }
 
-.report:first-child {
-  border-top: 0;
-  padding-top: 0;
+.editor-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
 }
 
-.report-body {
+.editor-grid .wide {
+  grid-column: 1 / -1;
+}
+
+.card-list {
+  display: grid;
+  gap: 12px;
+}
+
+.report-card,
+.playlist-card {
+  border: 1px solid #e1e6ee;
+  border-radius: 8px;
+  background: #fbfcfe;
+  padding: 14px;
+}
+
+.report-card {
+  border-left-width: 5px;
+}
+
+.priority-low {
+  border-left-color: #7a8699;
+}
+
+.priority-medium {
+  border-left-color: #2563eb;
+}
+
+.priority-high {
+  border-left-color: #d97706;
+}
+
+.priority-critical {
+  border-left-color: #b42318;
+}
+
+.card-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.card-head strong {
+  display: block;
+}
+
+.card-head small,
+.album-preview,
+.meta-line {
+  color: #687386;
+  font-size: 0.86rem;
+}
+
+.report-body,
+.notes {
   white-space: pre-wrap;
 }
 
-.report-status {
-  margin-top: 10px;
+.notes {
+  border-left: 3px solid #d6dce7;
+  color: #3b4352;
+  padding-left: 10px;
 }
 
 .pager {
@@ -312,6 +426,14 @@ th {
   .topbar-actions {
     justify-content: flex-start;
   }
+
+  .editor-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .card-head {
+    display: grid;
+  }
 }
 
 @media (prefers-color-scheme: dark) {
@@ -326,10 +448,17 @@ th {
   textarea,
   .login-card,
   .panel,
-  .stat {
+  .stat,
+  .report-card,
+  .playlist-card {
     border-color: #303744;
     background: #171b23;
     color: #f2f4f8;
+  }
+
+  .danger-card {
+    border-color: #6f2b27;
+    background: #2a1818;
   }
 
   button.secondary {
@@ -352,7 +481,20 @@ th {
   .muted,
   .login-card p,
   .recent-signups small,
-  .recent-signups em {
+  .recent-signups em,
+  .card-head small,
+  .album-preview,
+  .meta-line,
+  .stat small {
     color: #a7afbf;
+  }
+
+  .usage-bar {
+    background: #303744;
+  }
+
+  .notes {
+    border-left-color: #3b4352;
+    color: #d8deea;
   }
 }

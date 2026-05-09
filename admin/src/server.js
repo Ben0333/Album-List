@@ -8,16 +8,23 @@ import dotenv from 'dotenv';
 import express from 'express';
 import helmet from 'helmet';
 
+const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
+
+dotenv.config({ path: path.join(repoRoot, '.env'), override: false });
 dotenv.config();
+dotenv.config({ path: path.join(repoRoot, '.env.admin'), override: false });
 dotenv.config({ path: path.resolve(process.cwd(), '.env.admin'), override: false });
 
-const { closeDatabase, db, nowIso, transaction } = await import('@albums/shared/db');
+const { albumKey, closeDatabase, db, nowIso, transaction } = await import('@albums/shared/db');
 const { config } = await import('@albums/shared/config');
 
 const safeMethods = new Set(['GET', 'HEAD', 'OPTIONS']);
-const reportStatuses = new Set(['open', 'reviewing', 'closed', 'spam']);
+const reportStatuses = new Set(['open', 'in_progress', 'fixed', 'wont_fix']);
+const reportPriorities = new Set(['low', 'medium', 'high', 'critical']);
 const adminSessions = new Map();
 const rateLimitBuckets = new Map();
+const activeVisitorWindowMs = 120 * 1000;
+const activeVisitorRetentionMs = 10 * 60 * 1000;
 let lastRateLimitSweep = 0;
 
 function parseBoolean(value, defaultValue = false) {
@@ -328,6 +335,116 @@ function count(table, where = '', ...params) {
   return Number(row?.count || 0);
 }
 
+function fileSize(pathname) {
+  try {
+    return fs.statSync(pathname).size;
+  } catch {
+    return 0;
+  }
+}
+
+function formatBytes(bytes) {
+  const value = Number(bytes || 0);
+  if (!Number.isFinite(value) || value <= 0) return '0 B';
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  let size = value;
+  let unitIndex = 0;
+  while (size >= 1024 && unitIndex < units.length - 1) {
+    size /= 1024;
+    unitIndex += 1;
+  }
+  return `${size >= 10 || unitIndex === 0 ? Math.round(size) : size.toFixed(1)} ${units[unitIndex]}`;
+}
+
+function storageUsage() {
+  const databasePath = config.databasePath;
+  const database = {
+    path: databasePath,
+    mainBytes: fileSize(databasePath),
+    walBytes: fileSize(`${databasePath}-wal`),
+    shmBytes: fileSize(`${databasePath}-shm`)
+  };
+  database.totalBytes = database.mainBytes + database.walBytes + database.shmBytes;
+  database.totalLabel = formatBytes(database.totalBytes);
+
+  let disk = null;
+  if (typeof fs.statfsSync === 'function') {
+    try {
+      const stats = fs.statfsSync(path.dirname(databasePath));
+      const blockSize = Number(stats.bsize || 0);
+      const totalBytes = Number(stats.blocks || 0) * blockSize;
+      const freeBytes = Number(stats.bavail || stats.bfree || 0) * blockSize;
+      const usedBytes = Math.max(0, totalBytes - freeBytes);
+      if (totalBytes > 0) {
+        disk = {
+          usedBytes,
+          freeBytes,
+          totalBytes,
+          percentUsed: Math.round((usedBytes / totalBytes) * 1000) / 10,
+          usedLabel: formatBytes(usedBytes),
+          freeLabel: formatBytes(freeBytes),
+          totalLabel: formatBytes(totalBytes)
+        };
+      }
+    } catch {
+      disk = null;
+    }
+  }
+
+  return {
+    disk,
+    database,
+    fallback: !disk,
+    note: disk
+      ? ''
+      : 'Exact disk capacity is not available in this runtime; showing SQLite database file usage only.'
+  };
+}
+
+function cleanupActiveVisitors() {
+  const cutoff = new Date(Date.now() - activeVisitorRetentionMs).toISOString();
+  db.prepare('DELETE FROM active_visitors WHERE last_seen_at < ?').run(cutoff);
+}
+
+function activeVisitorSummary() {
+  cleanupActiveVisitors();
+  const cutoff = new Date(Date.now() - activeVisitorWindowMs).toISOString();
+  const row = db
+    .prepare(
+      `SELECT COUNT(*) AS total,
+              SUM(CASE WHEN user_id IS NULL THEN 1 ELSE 0 END) AS anonymous,
+              COUNT(DISTINCT CASE WHEN user_id IS NOT NULL THEN user_id END) AS logged_in_users
+       FROM active_visitors
+       WHERE last_seen_at >= ?`
+    )
+    .get(cutoff);
+  return {
+    total: Number(row?.total || 0),
+    anonymous: Number(row?.anonymous || 0),
+    loggedInUsers: Number(row?.logged_in_users || 0),
+    windowSeconds: Math.round(activeVisitorWindowMs / 1000)
+  };
+}
+
+function settingValue(key, fallback = '') {
+  return db.prepare('SELECT value FROM app_settings WHERE key = ?').get(key)?.value ?? fallback;
+}
+
+function setSettingValue(key, value, description = '') {
+  db.prepare(
+    `INSERT INTO app_settings (key, value, description, updated_at)
+     VALUES (?, ?, ?, ?)
+     ON CONFLICT(key) DO UPDATE SET
+       value = excluded.value,
+       description = CASE WHEN excluded.description != '' THEN excluded.description ELSE app_settings.description END,
+       updated_at = excluded.updated_at`
+  ).run(key, value, description, nowIso());
+}
+
+function maintenanceMode() {
+  return settingValue('maintenance_mode', '0') === '1';
+}
+
 function sqliteStringLiteral(value) {
   return `'${String(value).replaceAll("'", "''")}'`;
 }
@@ -386,13 +503,20 @@ function safeUser(row) {
 function safeReport(row) {
   return {
     id: row.id,
-    userId: row.user_id || null,
-    username: row.username || null,
-    email: row.email || null,
-    body: row.body,
-    path: row.path || '',
+    title: row.title,
+    description: row.description,
     status: row.status,
-    createdAt: row.created_at
+    priority: row.priority,
+    notes: row.notes || '',
+    source: row.source || '',
+    userId: row.user_id || null,
+    username: row.reporter_username || row.username || null,
+    email: row.email || null,
+    pagePath: row.page_path || '',
+    browser: row.browser || '',
+    userAgent: row.user_agent || '',
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
   };
 }
 
@@ -432,6 +556,290 @@ function getAdminUser(userId) {
     .get(nowIso(), userId);
   if (!row) throw httpError(404, 'User not found.');
   return safeUser(row);
+}
+
+function slugBase(value) {
+  const slug = String(value || '')
+    .trim()
+    .toLowerCase()
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/&/g, 'and')
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 70);
+  return slug || `explore-${randomToken(5).toLowerCase()}`;
+}
+
+function uniqueExploreSlug(name, existingId = null) {
+  const base = slugBase(name);
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    const slug = attempt === 0 ? base : `${base}-${attempt + 1}`;
+    const row = db.prepare('SELECT id FROM explore_playlists WHERE slug = ?').get(slug);
+    if (!row || row.id === existingId) return slug;
+  }
+  return `${base}-${randomToken(5).toLowerCase()}`;
+}
+
+function shareTokenFromLink(value) {
+  const text = clampText(value, 1000);
+  if (!text) throw httpError(400, 'Share link is required.');
+  let token = '';
+  try {
+    const url = new URL(text);
+    const parts = url.pathname.split('/').filter(Boolean);
+    const shareIndex = parts.indexOf('share');
+    token = shareIndex >= 0 ? parts[shareIndex + 1] || '' : '';
+  } catch {
+    const parts = text.split('/').filter(Boolean);
+    const shareIndex = parts.indexOf('share');
+    token = shareIndex >= 0 ? parts[shareIndex + 1] || '' : text;
+  }
+
+  try {
+    token = decodeURIComponent(token);
+  } catch {
+    token = '';
+  }
+
+  token = token.trim();
+  if (!/^[a-zA-Z0-9_-]{12,120}$/.test(token)) {
+    throw httpError(400, 'Share link must be a valid Turntable /share/... link or share token.');
+  }
+  return token;
+}
+
+function sharedListForLink(shareLink) {
+  const token = shareTokenFromLink(shareLink);
+  const list = db
+    .prepare(
+      `SELECT l.*, u.username AS owner_username
+       FROM lists l
+       JOIN users u ON u.id = l.owner_user_id
+       WHERE l.share_token = ?`
+    )
+    .get(token);
+  if (!list) throw httpError(404, 'No shared list was found for that link.');
+  const albums = db
+    .prepare(
+      `SELECT la.*, u.username AS added_by_username
+       FROM list_albums la
+       LEFT JOIN users u ON u.id = la.created_by
+       WHERE la.list_id = ?
+       ORDER BY la.sort_order ASC, la.id ASC`
+    )
+    .all(list.id);
+  if (!albums.length) throw httpError(400, 'That shared list has no albums to import.');
+  return { list, albums };
+}
+
+function safeExplorePlaylist(row, options = {}) {
+  const playlist = {
+    id: row.id,
+    slug: row.slug,
+    name: row.name,
+    description: row.description || '',
+    shareLink: row.share_link || '',
+    sourceListId: row.source_list_id || null,
+    sourceListName: row.source_list_name || '',
+    sourceOwnerUserId: row.source_owner_user_id || null,
+    sourceOwnerUsername: row.source_owner_username || '',
+    visible: Boolean(row.visible),
+    sortOrder: Number(row.sort_order || 0),
+    albumCount: Number(row.album_count || 0),
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    importedAt: row.imported_at || null
+  };
+  if (options.includeAlbums) {
+    playlist.albums = db
+      .prepare(
+        `SELECT id, sort_order, title, artist, album_key, cover_url, release_year, source_list_album_id, source_added_by_username
+         FROM explore_playlist_albums
+         WHERE playlist_id = ?
+         ORDER BY sort_order ASC, id ASC`
+      )
+      .all(row.id)
+      .map((album) => ({
+        id: album.id,
+        sortOrder: Number(album.sort_order || 0),
+        title: album.title,
+        artist: album.artist || '',
+        albumKey: album.album_key,
+        coverUrl: album.cover_url || '',
+        releaseYear: album.release_year ?? null,
+        sourceListAlbumId: album.source_list_album_id || null,
+        sourceAddedByUsername: album.source_added_by_username || ''
+      }));
+  }
+  return playlist;
+}
+
+function getExplorePlaylist(id) {
+  const row = db.prepare('SELECT * FROM explore_playlists WHERE id = ?').get(id);
+  if (!row) throw httpError(404, 'Explore playlist not found.');
+  return row;
+}
+
+function replaceExplorePlaylistAlbums(playlistId, albums) {
+  db.prepare('DELETE FROM explore_playlist_albums WHERE playlist_id = ?').run(playlistId);
+  const insertAlbum = db.prepare(
+    `INSERT INTO explore_playlist_albums
+     (playlist_id, sort_order, title, artist, album_key, cover_url, release_year, source_list_album_id, source_added_by_user_id, source_added_by_username, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  );
+  let count = 0;
+  for (const [index, album] of albums.entries()) {
+    const title = clampText(album.title, 160);
+    if (!title) continue;
+    const artist = clampText(album.artist, 160);
+    insertAlbum.run(
+      playlistId,
+      index + 1,
+      title,
+      artist,
+      album.album_key || albumKey(title, artist),
+      clampText(album.cover_url, 700),
+      album.release_year ?? null,
+      album.id || null,
+      album.created_by || null,
+      album.added_by_username || '',
+      nowIso()
+    );
+    count += 1;
+  }
+  db.prepare('UPDATE explore_playlists SET album_count = ?, updated_at = ?, imported_at = ? WHERE id = ?').run(
+    count,
+    nowIso(),
+    nowIso(),
+    playlistId
+  );
+  return count;
+}
+
+function createExplorePlaylistFromShare(body) {
+  const shareLink = clampText(body?.shareLink ?? body?.share_link, 1000);
+  const source = sharedListForLink(shareLink);
+  const name = clampText(body?.name, 120) || source.list.name;
+  const description = clampText(body?.description, 1200) || source.list.description || `Imported from ${source.list.name}.`;
+  const visible = body?.visible === false ? 0 : 1;
+  const sortOrder = parseBoundedInteger(body?.sortOrder ?? body?.sort_order, 0, { min: -100_000, max: 100_000 });
+
+  const playlist = transaction(() => {
+    const createdAt = nowIso();
+    const info = db
+      .prepare(
+        `INSERT INTO explore_playlists
+         (slug, name, description, share_link, source_list_id, source_list_name, source_owner_user_id, source_owner_username,
+          visible, sort_order, album_count, created_at, updated_at, imported_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)`
+      )
+      .run(
+        uniqueExploreSlug(name),
+        name,
+        description,
+        shareLink,
+        source.list.id,
+        source.list.name,
+        source.list.owner_user_id,
+        source.list.owner_username || '',
+        visible,
+        sortOrder,
+        createdAt,
+        createdAt,
+        createdAt
+      );
+    const playlistId = Number(info.lastInsertRowid);
+    const albumCount = replaceExplorePlaylistAlbums(playlistId, source.albums);
+    logAdminAction('explore_playlist_create', {
+      details: {
+        playlistId,
+        name,
+        sourceListId: source.list.id,
+        albumCount
+      }
+    });
+    return getExplorePlaylist(playlistId);
+  })();
+
+  return safeExplorePlaylist(playlist, { includeAlbums: true });
+}
+
+function updateExplorePlaylistFromBody(playlistId, body, { forceImport = false } = {}) {
+  const updated = transaction(() => {
+    const existing = getExplorePlaylist(playlistId);
+    const nextName = body?.name === undefined ? existing.name : clampText(body.name, 120);
+    if (!nextName) throw httpError(400, 'Playlist name is required.');
+    const nextDescription = body?.description === undefined ? existing.description || '' : clampText(body.description, 1200);
+    const nextVisible = body?.visible === undefined ? existing.visible : body.visible === false ? 0 : 1;
+    const nextSortOrder =
+      body?.sortOrder === undefined && body?.sort_order === undefined
+        ? existing.sort_order
+        : parseBoundedInteger(body?.sortOrder ?? body?.sort_order, existing.sort_order, { min: -100_000, max: 100_000 });
+    const nextShareLink =
+      body?.shareLink === undefined && body?.share_link === undefined ? existing.share_link || '' : clampText(body?.shareLink ?? body?.share_link, 1000);
+
+    let source = null;
+    if (forceImport || nextShareLink !== (existing.share_link || '')) {
+      source = sharedListForLink(nextShareLink);
+    }
+
+    db.prepare(
+      `UPDATE explore_playlists
+       SET name = ?,
+           description = ?,
+           share_link = ?,
+           source_list_id = ?,
+           source_list_name = ?,
+           source_owner_user_id = ?,
+           source_owner_username = ?,
+           visible = ?,
+           sort_order = ?,
+           updated_at = ?
+       WHERE id = ?`
+    ).run(
+      nextName,
+      nextDescription,
+      nextShareLink,
+      source ? source.list.id : existing.source_list_id,
+      source ? source.list.name : existing.source_list_name || '',
+      source ? source.list.owner_user_id : existing.source_owner_user_id,
+      source ? source.list.owner_username || '' : existing.source_owner_username || '',
+      nextVisible,
+      nextSortOrder,
+      nowIso(),
+      playlistId
+    );
+
+    let imported = false;
+    let albumCount = existing.album_count;
+    if (source) {
+      albumCount = replaceExplorePlaylistAlbums(playlistId, source.albums);
+      imported = true;
+      logAdminAction('explore_playlist_import', {
+        details: {
+          playlistId,
+          sourceListId: source.list.id,
+          albumCount
+        }
+      });
+    }
+
+    logAdminAction('explore_playlist_update', {
+      details: {
+        playlistId,
+        name: nextName,
+        visible: Boolean(nextVisible),
+        sortOrder: nextSortOrder,
+        imported,
+        albumCount
+      }
+    });
+
+    return getExplorePlaylist(playlistId);
+  })();
+
+  return safeExplorePlaylist(updated, { includeAlbums: true });
 }
 
 const app = express();
@@ -549,12 +957,16 @@ app.post(
       });
     } catch (error) {
       if (backup) backup.cleanup();
-      throw error;
+      console.error(error);
+      const backupError = httpError(500, 'Could not create a database backup. Check that the database path is writable and try again.');
+      backupError.expose = true;
+      throw backupError;
     }
 
     res.setHeader('Cache-Control', 'no-store');
     res.setHeader('Pragma', 'no-cache');
     res.setHeader('Content-Type', 'application/vnd.sqlite3');
+    res.setHeader('Content-Length', String(backup.sizeBytes));
     res.download(backup.filePath, backup.fileName, (error) => {
       backup.cleanup();
       if (!error) return;
@@ -571,6 +983,7 @@ app.get(
   '/admin/api/summary',
   route((req, res) => {
     const activeAt = nowIso();
+    const visitors = activeVisitorSummary();
     const bugReportsByStatus = db
       .prepare(
         `SELECT status, COUNT(*) AS count
@@ -601,14 +1014,53 @@ app.get(
         users: count('users'),
         disabledUsers: count('users', 'WHERE disabled_at IS NOT NULL'),
         activeSessions: count('sessions', 'WHERE expires_at > ?', activeAt),
+        activeVisitors: visitors.total,
         lists: count('lists'),
         albums: count('list_albums'),
         ratings: count('track_ratings'),
         messages: count('list_messages')
       },
+      activeVisitors: visitors,
+      storage: storageUsage(),
+      maintenance: {
+        enabled: maintenanceMode()
+      },
       bugReportsByStatus,
       recentSignups
     });
+  })
+);
+
+app.get(
+  '/admin/api/settings',
+  route((req, res) => {
+    res.json({
+      maintenance: {
+        enabled: maintenanceMode()
+      },
+      storage: storageUsage(),
+      activeVisitors: activeVisitorSummary()
+    });
+  })
+);
+
+app.patch(
+  '/admin/api/settings/maintenance',
+  route((req, res) => {
+    const enabled = req.body?.enabled === true;
+    const previous = maintenanceMode();
+    setSettingValue(
+      'maintenance_mode',
+      enabled ? '1' : '0',
+      'When set to 1, the public website returns a maintenance page and public API writes are unavailable.'
+    );
+    logAdminAction('maintenance_update', {
+      details: {
+        previousEnabled: previous,
+        enabled
+      }
+    });
+    res.json({ maintenance: { enabled } });
   })
 );
 
@@ -729,6 +1181,8 @@ app.get(
     const limit = parseBoundedInteger(req.query.limit, 50, { min: 1, max: 100 });
     const offset = parseBoundedInteger(req.query.offset, 0, { min: 0, max: 100_000 });
     const status = String(req.query.status || '').trim().toLowerCase();
+    const priority = String(req.query.priority || '').trim().toLowerCase();
+    const q = clampText(req.query.q, 120);
     const filters = [];
     const params = [];
 
@@ -737,16 +1191,30 @@ app.get(
       filters.push('br.status = ?');
       params.push(status);
     }
+    if (priority) {
+      if (!reportPriorities.has(priority)) throw httpError(400, 'Invalid report priority.');
+      filters.push('br.priority = ?');
+      params.push(priority);
+    }
+    if (q) {
+      const like = `%${escapeLike(q.toLowerCase())}%`;
+      filters.push('(LOWER(br.title) LIKE ? ESCAPE ? OR LOWER(br.description) LIKE ? ESCAPE ? OR CAST(br.id AS TEXT) = ?)');
+      params.push(like, '\\', like, '\\', /^\d+$/.test(q) ? q : '');
+    }
 
     const where = filters.length ? `WHERE ${filters.join(' AND ')}` : '';
     const total = db.prepare(`SELECT COUNT(*) AS count FROM bug_reports br ${where}`).get(...params).count;
     const reports = db
       .prepare(
-        `SELECT br.id, br.user_id, br.body, br.path, br.status, br.created_at, u.username, u.email
+        `SELECT br.*, u.username, u.email
          FROM bug_reports br
          LEFT JOIN users u ON u.id = br.user_id
          ${where}
-         ORDER BY br.created_at DESC, br.id DESC
+         ORDER BY
+           CASE br.priority WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 ELSE 3 END,
+           CASE br.status WHEN 'open' THEN 0 WHEN 'in_progress' THEN 1 WHEN 'fixed' THEN 2 ELSE 3 END,
+           br.updated_at DESC,
+           br.id DESC
          LIMIT ? OFFSET ?`
       )
       .all(...params, limit, offset)
@@ -756,17 +1224,70 @@ app.get(
   })
 );
 
+app.post(
+  '/admin/api/reports',
+  route((req, res) => {
+    const title = clampText(req.body?.title, 160);
+    const description = clampText(req.body?.description ?? req.body?.body, 4000);
+    const status = String(req.body?.status || 'open').trim().toLowerCase();
+    const priority = String(req.body?.priority || 'medium').trim().toLowerCase();
+    const notes = clampText(req.body?.notes, 4000);
+
+    if (!title) throw httpError(400, 'Bug title is required.');
+    if (!description) throw httpError(400, 'Bug details are required.');
+    if (!reportStatuses.has(status)) throw httpError(400, 'Invalid report status.');
+    if (!reportPriorities.has(priority)) throw httpError(400, 'Invalid report priority.');
+
+    const createdAt = nowIso();
+    const info = db
+      .prepare(
+        `INSERT INTO bug_reports
+         (title, description, status, priority, notes, source, page_path, browser, user_agent, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, 'admin', ?, ?, ?, ?, ?)`
+      )
+      .run(
+        title,
+        description,
+        status,
+        priority,
+        notes,
+        clampText(req.body?.pagePath, 300),
+        clampText(req.body?.browser, 500),
+        clampText(req.body?.userAgent, 500),
+        createdAt,
+        createdAt
+      );
+
+    logAdminAction('bug_create', {
+      details: {
+        reportId: Number(info.lastInsertRowid),
+        title,
+        status,
+        priority
+      }
+    });
+
+    const report = db
+      .prepare(
+        `SELECT br.*, u.username, u.email
+         FROM bug_reports br
+         LEFT JOIN users u ON u.id = br.user_id
+         WHERE br.id = ?`
+      )
+      .get(Number(info.lastInsertRowid));
+    res.status(201).json({ report: safeReport(report) });
+  })
+);
+
 app.patch(
-  '/admin/api/reports/:id/status',
+  '/admin/api/reports/:id',
   route((req, res) => {
     const reportId = parseId(req.params.id, 'Report id');
-    const status = String(req.body?.status || '').trim().toLowerCase();
-    if (!reportStatuses.has(status)) throw httpError(400, 'Invalid report status.');
 
     const report = transaction(() => {
       const existing = db
         .prepare(
-          `SELECT br.id, br.user_id, br.body, br.path, br.status, br.created_at, u.username, u.email
+          `SELECT br.*, u.username, u.email
            FROM bug_reports br
            LEFT JOIN users u ON u.id = br.user_id
            WHERE br.id = ?`
@@ -774,21 +1295,43 @@ app.patch(
         .get(reportId);
       if (!existing) throw httpError(404, 'Report not found.');
 
-      db.prepare('UPDATE bug_reports SET status = ? WHERE id = ?').run(status, reportId);
-      logAdminAction('report_status', {
+      const title = req.body?.title === undefined ? existing.title : clampText(req.body.title, 160);
+      const description =
+        req.body?.description === undefined ? existing.description : clampText(req.body.description, 4000);
+      const status = req.body?.status === undefined ? existing.status : String(req.body.status || '').trim().toLowerCase();
+      const priority = req.body?.priority === undefined ? existing.priority : String(req.body.priority || '').trim().toLowerCase();
+      const notes = req.body?.notes === undefined ? existing.notes || '' : clampText(req.body.notes, 4000);
+      const pagePath = req.body?.pagePath === undefined ? existing.page_path || '' : clampText(req.body.pagePath, 300);
+      const browser = req.body?.browser === undefined ? existing.browser || '' : clampText(req.body.browser, 500);
+
+      if (!title) throw httpError(400, 'Bug title is required.');
+      if (!description) throw httpError(400, 'Bug details are required.');
+      if (!reportStatuses.has(status)) throw httpError(400, 'Invalid report status.');
+      if (!reportPriorities.has(priority)) throw httpError(400, 'Invalid report priority.');
+
+      db.prepare(
+        `UPDATE bug_reports
+         SET title = ?, description = ?, status = ?, priority = ?, notes = ?, page_path = ?, browser = ?, updated_at = ?
+         WHERE id = ?`
+      ).run(title, description, status, priority, notes, pagePath, browser, nowIso(), reportId);
+      logAdminAction(status !== existing.status ? 'report_status' : 'bug_update', {
         userId: existing.user_id || null,
-        previousUsername: existing.username || '',
-        newUsername: existing.username || '',
+        previousUsername: existing.reporter_username || existing.username || '',
+        newUsername: existing.reporter_username || existing.username || '',
         details: {
           reportId,
+          previousTitle: existing.title,
+          title,
           previousStatus: existing.status,
-          newStatus: status
+          status,
+          previousPriority: existing.priority,
+          priority
         }
       });
 
       return db
         .prepare(
-          `SELECT br.id, br.user_id, br.body, br.path, br.status, br.created_at, u.username, u.email
+          `SELECT br.*, u.username, u.email
            FROM bug_reports br
            LEFT JOIN users u ON u.id = br.user_id
            WHERE br.id = ?`
@@ -796,6 +1339,107 @@ app.patch(
         .get(reportId);
     })();
     res.json({ report: safeReport(report) });
+  })
+);
+
+app.patch(
+  '/admin/api/reports/:id/status',
+  route((req, res) => {
+    const reportId = parseId(req.params.id, 'Report id');
+    const status = String(req.body?.status || '').trim().toLowerCase();
+    if (!reportStatuses.has(status)) throw httpError(400, 'Invalid report status.');
+    req.body = { status };
+    req.params.id = String(reportId);
+    const existing = db.prepare('SELECT id FROM bug_reports WHERE id = ?').get(reportId);
+    if (!existing) throw httpError(404, 'Report not found.');
+    db.prepare('UPDATE bug_reports SET status = ?, updated_at = ? WHERE id = ?').run(status, nowIso(), reportId);
+    logAdminAction('report_status', { details: { reportId, status } });
+    const report = db
+      .prepare(
+        `SELECT br.*, u.username, u.email
+         FROM bug_reports br
+         LEFT JOIN users u ON u.id = br.user_id
+         WHERE br.id = ?`
+      )
+      .get(reportId);
+    res.json({ report: safeReport(report) });
+  })
+);
+
+app.delete(
+  '/admin/api/reports/:id',
+  route((req, res) => {
+    const reportId = parseId(req.params.id, 'Report id');
+    const existing = db.prepare('SELECT id, title, status, priority FROM bug_reports WHERE id = ?').get(reportId);
+    if (!existing) throw httpError(404, 'Report not found.');
+    db.prepare('DELETE FROM bug_reports WHERE id = ?').run(reportId);
+    logAdminAction('bug_delete', {
+      details: {
+        reportId,
+        title: existing.title,
+        status: existing.status,
+        priority: existing.priority
+      }
+    });
+    res.json({ ok: true });
+  })
+);
+
+app.get(
+  '/admin/api/explore-playlists',
+  route((req, res) => {
+    const playlists = db
+      .prepare(
+        `SELECT *
+         FROM explore_playlists
+         ORDER BY sort_order ASC, name COLLATE NOCASE ASC, id ASC`
+      )
+      .all()
+      .map((row) => safeExplorePlaylist(row, { includeAlbums: true }));
+    res.json({ playlists });
+  })
+);
+
+app.post(
+  '/admin/api/explore-playlists',
+  route((req, res) => {
+    const playlist = createExplorePlaylistFromShare(req.body || {});
+    res.status(201).json({ playlist });
+  })
+);
+
+app.patch(
+  '/admin/api/explore-playlists/:id',
+  route((req, res) => {
+    const playlistId = parseId(req.params.id, 'Playlist id');
+    const playlist = updateExplorePlaylistFromBody(playlistId, req.body || {});
+    res.json({ playlist });
+  })
+);
+
+app.post(
+  '/admin/api/explore-playlists/:id/import',
+  route((req, res) => {
+    const playlistId = parseId(req.params.id, 'Playlist id');
+    const playlist = updateExplorePlaylistFromBody(playlistId, req.body || {}, { forceImport: true });
+    res.json({ playlist });
+  })
+);
+
+app.delete(
+  '/admin/api/explore-playlists/:id',
+  route((req, res) => {
+    const playlistId = parseId(req.params.id, 'Playlist id');
+    const existing = getExplorePlaylist(playlistId);
+    db.prepare('DELETE FROM explore_playlists WHERE id = ?').run(playlistId);
+    logAdminAction('explore_playlist_delete', {
+      details: {
+        playlistId,
+        name: existing.name,
+        albumCount: existing.album_count
+      }
+    });
+    res.json({ ok: true });
   })
 );
 
@@ -813,7 +1457,7 @@ app.use((err, req, res, next) => {
   if (err.retryAfter) res.setHeader('Retry-After', String(err.retryAfter));
   res.status(status).json({
     error: {
-      message: status >= 500 ? 'Something went wrong.' : err.message,
+      message: status >= 500 && !err.expose ? 'Something went wrong.' : err.message,
       status
     }
   });

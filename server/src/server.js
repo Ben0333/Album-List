@@ -8,7 +8,7 @@ import express from 'express';
 import helmet from 'helmet';
 import { albumKey, closeDatabase, db, normalizeText, nowIso, trackKey, transaction } from '@albums/shared/db';
 import { config } from '@albums/shared/config';
-import { exploreLists } from './explore-data.js';
+import { exploreLists as staticExploreLists } from './explore-data.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -48,6 +48,8 @@ const albumSearchCacheTtlMs = 5 * 60 * 1000;
 const albumLookupCacheTtlMs = 20 * 60 * 1000;
 const imageProbeSuccessTtlMs = 6 * 60 * 60 * 1000;
 const imageProbeFailureTtlMs = 15 * 60 * 1000;
+const activeVisitorWindowMs = 120 * 1000;
+const activeVisitorRetentionMs = 10 * 60 * 1000;
 const slowRequestMs = parsePositiveInteger(process.env.SLOW_REQUEST_MS, 750, { min: 1, max: 60_000 });
 let musicBrainzQueue = Promise.resolve();
 let lastMusicBrainzRequestAt = 0;
@@ -104,6 +106,7 @@ app.use(logApiRequest);
 app.use(validateRequestOrigin);
 app.use(express.json({ limit: '2mb' }));
 app.use(loadSession);
+app.use(appAvailabilityGate);
 app.use(
   express.static(publicDir, {
     setHeaders(res, filePath) {
@@ -552,6 +555,73 @@ function loadSession(req, res, next) {
   req.sessionTokenHash = tokenHash;
   db.prepare('UPDATE sessions SET last_seen_at = ? WHERE token_hash = ?').run(nowIso(), tokenHash);
   next();
+}
+
+function settingValue(key, fallback = '') {
+  return db.prepare('SELECT value FROM app_settings WHERE key = ?').get(key)?.value ?? fallback;
+}
+
+function maintenanceModeEnabled() {
+  return settingValue('maintenance_mode', '0') === '1';
+}
+
+function maintenancePageHtml() {
+  return `<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Maintenance mode</title>
+    <style>
+      :root { color-scheme: light dark; font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+      body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: #f6f7f9; color: #151922; }
+      main { width: min(520px, calc(100vw - 40px)); }
+      h1 { margin: 0 0 10px; font-size: 1.65rem; }
+      p { margin: 0; color: #5d687a; line-height: 1.5; }
+      @media (prefers-color-scheme: dark) {
+        body { background: #101318; color: #f2f4f8; }
+        p { color: #a7afbf; }
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Maintenance mode: public site closed.</h1>
+      <p>The album list is temporarily unavailable while maintenance is enabled. Admin controls remain available separately.</p>
+    </main>
+  </body>
+</html>`;
+}
+
+function appAvailabilityGate(req, res, next) {
+  if (!maintenanceModeEnabled()) {
+    next();
+    return;
+  }
+
+  if (req.path.startsWith('/admin') || req.path === '/api/health' || req.path === '/api/ops/diagnostics') {
+    next();
+    return;
+  }
+
+  res.setHeader('Cache-Control', 'no-store');
+  if (req.path.startsWith('/api/')) {
+    res.status(503).json({
+      error: {
+        message: 'Maintenance mode: public site closed.',
+        status: 503
+      },
+      maintenanceMode: true
+    });
+    return;
+  }
+
+  if (req.method !== 'GET' && req.method !== 'HEAD') {
+    res.status(503).type('text/plain').send('Maintenance mode: public site closed.');
+    return;
+  }
+
+  res.status(503).type('html').send(maintenancePageHtml());
 }
 
 function requireUser(req) {
@@ -3039,11 +3109,11 @@ function buildUserProfile(username, viewer) {
 }
 
 function exploreListBySlug(slug) {
-  return exploreLists.find((item) => item.slug === slug);
+  return allExploreLists({ includeHidden: true }).find((item) => item.slug === slug);
 }
 
 function exploreAlbumSourceByKey(albumKeyValue) {
-  for (const list of exploreLists) {
+  for (const list of allExploreLists({ includeHidden: true })) {
     const index = list.albums.findIndex((album) => albumKey(album.title, album.artist) === albumKeyValue);
     if (index >= 0) return { list, album: list.albums[index], index };
   }
@@ -3051,7 +3121,50 @@ function exploreAlbumSourceByKey(albumKeyValue) {
 }
 
 function visibleExploreLists() {
-  return exploreLists.filter((list) => !hiddenExploreSlugs.has(list.slug));
+  return allExploreLists().filter((list) => !hiddenExploreSlugs.has(list.slug));
+}
+
+function dynamicExploreLists({ includeHidden = false } = {}) {
+  const filters = includeHidden ? '' : 'WHERE ep.visible = 1';
+  const playlists = db
+    .prepare(
+      `SELECT ep.*
+       FROM explore_playlists ep
+       ${filters}
+       ORDER BY ep.sort_order ASC, ep.name COLLATE NOCASE ASC, ep.id ASC`
+    )
+    .all();
+  const albumRows = db.prepare(
+    `SELECT title, artist, cover_url, release_year
+     FROM explore_playlist_albums
+     WHERE playlist_id = ?
+     ORDER BY sort_order ASC, id ASC`
+  );
+
+  return playlists.map((playlist) => {
+    const albums = albumRows.all(playlist.id).map((album) => ({
+      title: album.title,
+      artist: album.artist || '',
+      releaseYear: album.release_year ?? null,
+      spotifyId: '',
+      coverUrl: safeExternalImageUrl(album.cover_url)
+    }));
+    return {
+      slug: playlist.slug,
+      name: playlist.name,
+      description: playlist.description || '',
+      sourceUrl: playlist.share_link || '',
+      albumCount: albums.length,
+      dynamic: true,
+      playlistId: playlist.id,
+      albums
+    };
+  });
+}
+
+function allExploreLists({ includeHidden = false } = {}) {
+  const staticLists = includeHidden ? staticExploreLists : staticExploreLists.filter((list) => !hiddenExploreSlugs.has(list.slug));
+  return [...staticLists, ...dynamicExploreLists({ includeHidden })];
 }
 
 function exploreAlbumStatuses(user) {
@@ -3674,7 +3787,7 @@ function buildRecommendations(user, limit = 12) {
 
   if (recommendations.length >= Math.min(4, limit)) return recommendations;
 
-  for (const list of exploreLists.slice(0, 3)) {
+  for (const list of visibleExploreLists().slice(0, 3)) {
     for (const album of list.albums) {
       const key = albumKey(album.title, album.artist);
       if (knownKeys.has(key) || recommendations.some((item) => item.albumKey === key)) continue;
@@ -3692,6 +3805,21 @@ function buildRecommendations(user, limit = 12) {
   }
 
   return recommendations;
+}
+
+function cleanupActiveVisitors() {
+  const cutoff = new Date(Date.now() - activeVisitorRetentionMs).toISOString();
+  db.prepare('DELETE FROM active_visitors WHERE last_seen_at < ?').run(cutoff);
+}
+
+function safeVisitorId(value) {
+  const text = String(value || '').trim();
+  return /^[a-zA-Z0-9_-]{16,80}$/.test(text) ? text : randomToken(24);
+}
+
+function safeClientPath(value) {
+  const text = clampText(value, 300);
+  return text.startsWith('/') && !text.startsWith('//') ? text : '/';
 }
 
 app.get(
@@ -3721,6 +3849,43 @@ app.get(
       },
       rateLimitBuckets: rateLimitBuckets.size
     });
+  })
+);
+
+app.post(
+  '/api/activity/heartbeat',
+  route((req, res) => {
+    enforceRateLimit(req, 'activity-heartbeat', {
+      limit: 180,
+      windowMs: 60 * 1000,
+      key: rateLimitIdentity(req),
+      message: 'Heartbeat is temporarily rate limited.'
+    });
+
+    cleanupActiveVisitors();
+    const visitorId = safeVisitorId(req.body?.visitorId);
+    const seenAt = nowIso();
+    db.prepare(
+      `INSERT INTO active_visitors (visitor_id, user_id, path, user_agent, ip_hash, created_at, last_seen_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(visitor_id) DO UPDATE SET
+         user_id = excluded.user_id,
+         path = excluded.path,
+         user_agent = excluded.user_agent,
+         ip_hash = excluded.ip_hash,
+         last_seen_at = excluded.last_seen_at`
+    ).run(
+      visitorId,
+      req.user?.id ?? null,
+      safeClientPath(req.body?.path),
+      clampText(req.get('user-agent'), 500),
+      hashToken(clientIp(req)),
+      seenAt,
+      seenAt
+    );
+
+    res.setHeader('Cache-Control', 'no-store');
+    res.json({ ok: true, visitorId, activeWindowSeconds: Math.round(activeVisitorWindowMs / 1000) });
   })
 );
 
@@ -4308,6 +4473,8 @@ app.post(
     const safePath = path.startsWith('/') && !path.startsWith('//') ? path : '';
     const ipHash = hashToken(clientIp(req));
     const bodyHash = hashToken(normalizeText(body));
+    const title = clampText(req.body?.title, 160) || body.split(/\r?\n/).find((line) => line.trim())?.trim().slice(0, 120) || 'Public bug report';
+    const userAgent = clampText(req.get('user-agent'), 500);
     const cutoff = new Date(Date.now() - 60 * 60 * 1000).toISOString();
     const duplicate = db
       .prepare(
@@ -4323,10 +4490,23 @@ app.post(
 
     const info = db
       .prepare(
-        `INSERT INTO bug_reports (user_id, body, path, user_agent, ip_hash, body_hash, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`
+        `INSERT INTO bug_reports
+         (title, description, status, priority, source, user_id, reporter_username, page_path, browser, user_agent, ip_hash, body_hash, created_at, updated_at)
+         VALUES (?, ?, 'open', 'medium', 'public_report', ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
-      .run(user?.id ?? null, body, safePath, clampText(req.get('user-agent'), 500), ipHash, bodyHash, nowIso());
+      .run(
+        title,
+        body,
+        user?.id ?? null,
+        user?.username || '',
+        safePath,
+        userAgent,
+        userAgent,
+        ipHash,
+        bodyHash,
+        nowIso(),
+        nowIso()
+      );
 
     res.status(201).json({ ok: true, id: Number(info.lastInsertRowid) });
   })
