@@ -38,13 +38,16 @@ const platformAccents = {
 const exploreCoverMemoryCache = new Map();
 const albumSearchMemoryCache = new Map();
 const albumLookupMemoryCache = new Map();
+const imageProbeMemoryCache = new Map();
 const albumLevelTrackKey = '__album__';
 const hiddenExploreSlugs = new Set(['before-you-die', 'modern-classics', 'hip-hop-foundations', 'famous-band-essentials']);
 const maxAlbumsPerList = 500;
 const metadataUserAgent = `AlbumsToListenTo/0.1 (${config.appOrigin})`;
-const metadataCacheMaxEntries = 250;
+const metadataCacheMaxEntries = 5000;
 const albumSearchCacheTtlMs = 5 * 60 * 1000;
 const albumLookupCacheTtlMs = 20 * 60 * 1000;
+const imageProbeSuccessTtlMs = 6 * 60 * 60 * 1000;
+const imageProbeFailureTtlMs = 15 * 60 * 1000;
 const slowRequestMs = parsePositiveInteger(process.env.SLOW_REQUEST_MS, 750, { min: 1, max: 60_000 });
 let musicBrainzQueue = Promise.resolve();
 let lastMusicBrainzRequestAt = 0;
@@ -1023,6 +1026,10 @@ async function cachedMetadata(cache, key, ttlMs, loader) {
 async function imageUrlWorks(value) {
   const safeUrl = safeExternalImageUrl(value);
   if (!safeUrl) return false;
+  const cached = imageProbeMemoryCache.get(safeUrl);
+  if (cached && cached.expiresAt > Date.now()) return cached.works;
+
+  let works = false;
   for (const method of ['HEAD', 'GET']) {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 8000);
@@ -1039,14 +1046,22 @@ async function imageUrlWorks(value) {
       });
       const contentType = String(response.headers.get('content-type') || '').toLowerCase();
       await response.body?.cancel?.();
-      if (response.ok && contentType.startsWith('image/')) return true;
+      if (response.ok && contentType.startsWith('image/')) {
+        works = true;
+        break;
+      }
     } catch {
       // Try the next probing method before giving up.
     } finally {
       clearTimeout(timeout);
     }
   }
-  return false;
+  imageProbeMemoryCache.set(safeUrl, {
+    works,
+    expiresAt: Date.now() + (works ? imageProbeSuccessTtlMs : imageProbeFailureTtlMs)
+  });
+  pruneCache(imageProbeMemoryCache);
+  return works;
 }
 
 async function spotifyAlbumCover(spotifyId) {
@@ -1283,6 +1298,19 @@ function formatItunesSongAlbum(result) {
   };
 }
 
+function formatDeezerAlbum(result) {
+  return {
+    provider: 'deezer',
+    providerId: `dz:${result.id}`,
+    title: result.title || '',
+    artist: result.artist?.name || '',
+    releaseYear: result.release_date ? new Date(result.release_date).getUTCFullYear() : null,
+    trackCount: result.nb_tracks || 0,
+    coverUrl: safeExternalImageUrl(result.cover_xl || result.cover_big || result.cover_medium || result.cover || ''),
+    sourceUrl: result.link || ''
+  };
+}
+
 function formatMusicBrainzSearchAlbum(result) {
   const releaseGroup = result['release-group'] || {};
   const releaseDate = result.date || releaseGroup['first-release-date'] || '';
@@ -1433,6 +1461,27 @@ function scoreItunesResult(result, query) {
   return score;
 }
 
+function scoreDeezerResult(result, query) {
+  const normalizedQuery = normalizeText(query);
+  const title = normalizeText(result.title);
+  const artist = normalizeText(result.artist?.name);
+  const trackCount = Number(result.nb_tracks || 0);
+  const nonAlbumRelease = likelyNonAlbumRelease(result.title);
+  let score = 130;
+  if (result.record_type === 'album') score += 80;
+  if (title === normalizedQuery) score += 170;
+  else if (title && (title.includes(normalizedQuery) || normalizedQuery.includes(title))) score += 70;
+  if (artist === normalizedQuery) score += 360;
+  else if (artist.includes(normalizedQuery)) score += 60;
+  if (trackCount >= 6 && trackCount <= 30) score += 130;
+  else if (trackCount > 30) score -= Math.min(160, (trackCount - 30) * 4);
+  else if (trackCount > 0 && trackCount <= 2) score -= 120;
+  score += scoreTitleArtistCoverage(result.title, result.artist?.name, query);
+  if (safeExternalImageUrl(result.cover_xl || result.cover_big || result.cover_medium || result.cover)) score += 40;
+  if (nonAlbumRelease) score -= 260;
+  return score;
+}
+
 function scoreMusicBrainzResult(result, query) {
   const normalizedQuery = normalizeText(query);
   const title = normalizeText(result.title || result['release-group']?.title);
@@ -1518,15 +1567,39 @@ async function searchItunesAlbums(query, country = 'US') {
     .filter((album) => album.title);
 }
 
+async function searchDeezerAlbums(query) {
+  const searches = [];
+  for (const variant of searchVariants(query)) {
+    const url = new URL('https://api.deezer.com/search/album');
+    url.searchParams.set('q', variant);
+    url.searchParams.set('limit', '15');
+    searches.push(fetchJson(url));
+  }
+
+  const settledSearches = await Promise.allSettled(searches);
+  return settledSearches
+    .flatMap((result) => (result.status === 'fulfilled' ? result.value.data || [] : []))
+    .map((result) => ({
+      ...formatDeezerAlbum(result),
+      score: scoreDeezerResult(result, query)
+    }))
+    .filter((album) => album.title);
+}
+
 async function searchAlbumsUncached(term, country = 'US') {
   const query = clampText(term, 120);
   if (query.length < 2) return [];
   const specialMatches = specialAlbumMatches(query);
-  const [itunesMatches, musicBrainzMatches] = await Promise.allSettled([searchItunesAlbums(query, country), searchMusicBrainzAlbums(query)]);
+  const [itunesMatches, musicBrainzMatches, deezerMatches] = await Promise.allSettled([
+    searchItunesAlbums(query, country),
+    searchMusicBrainzAlbums(query),
+    searchDeezerAlbums(query)
+  ]);
   const results = [
     ...specialMatches.map((album) => ({ ...album, score: 5000 })),
     ...(itunesMatches.status === 'fulfilled' ? itunesMatches.value : []),
-    ...(musicBrainzMatches.status === 'fulfilled' ? musicBrainzMatches.value : [])
+    ...(musicBrainzMatches.status === 'fulfilled' ? musicBrainzMatches.value : []),
+    ...(deezerMatches.status === 'fulfilled' ? deezerMatches.value : [])
   ];
 
   return collapseAlbumSearchResults(results)
@@ -1543,6 +1616,7 @@ function albumSearchQualityScore(album) {
   const trackCount = Number(album.trackCount || 0);
   let score = 0;
   if (album.provider === 'itunes') score += 90;
+  else if (album.provider === 'deezer') score += 70;
   else if (album.provider === 'musicbrainz') score += 25;
   if (trackCount) score += Math.min(trackCount, 40) * 3;
   if (trackCount >= 6 && trackCount <= 30) score += 90;
@@ -1633,6 +1707,9 @@ async function lookupAlbumUncached(providerId, country = 'US') {
   if (String(providerId || '').startsWith('mb:')) {
     return lookupMusicBrainzRelease(String(providerId).slice(3));
   }
+  if (String(providerId || '').startsWith('dz:')) {
+    return lookupDeezerAlbum(String(providerId).slice(3));
+  }
   const id = String(providerId || '').replace(/[^0-9]/g, '');
   if (!id) throw httpError(400, 'Album id is required.');
   const albumData = await lookupItunesAlbumData(id, country);
@@ -1713,6 +1790,34 @@ async function lookupAlbum(providerId, country = 'US') {
   return cachedMetadata(albumLookupMemoryCache, key, albumLookupCacheTtlMs, () => lookupAlbumUncached(providerId, country));
 }
 
+async function lookupDeezerAlbum(deezerId) {
+  const id = String(deezerId || '').replace(/[^0-9]/g, '');
+  if (!id) throw httpError(400, 'Album id is required.');
+  const data = await fetchJson(new URL(`https://api.deezer.com/album/${id}`));
+  if (data?.error || !data.id) throw httpError(404, 'Album metadata not found.');
+  const tracks = (data.tracks?.data || [])
+    .sort((a, b) => (a.disk_number || 1) - (b.disk_number || 1) || (a.track_position || 0) - (b.track_position || 0))
+    .map((track, index) => ({
+      title: clampText(track.title, 160),
+      keyTitle: clampText(track.title, 160),
+      discNumber: Number(track.disk_number || 1),
+      position: index + 1
+    }))
+    .filter((track) => track.title);
+
+  return {
+    provider: 'deezer',
+    providerId: `dz:${id}`,
+    title: data.title || '',
+    artist: data.artist?.name || '',
+    releaseYear: data.release_date ? new Date(data.release_date).getUTCFullYear() : null,
+    trackCount: tracks.length || data.nb_tracks || 0,
+    coverUrl: safeExternalImageUrl(data.cover_xl || data.cover_big || data.cover_medium || data.cover || ''),
+    sourceUrl: data.link || '',
+    tracks
+  };
+}
+
 async function lookupMusicBrainzRelease(releaseId) {
   const id = String(releaseId || '').trim();
   if (!/^[0-9a-f-]{36}$/i.test(id)) throw httpError(400, 'Album id is required.');
@@ -1761,6 +1866,7 @@ function scoreCoverCandidate(album, title, artist) {
     else if (candidateArtist.includes(targetArtist) || targetArtist.includes(candidateArtist)) score += 130;
   }
   if (album.provider === 'itunes') score += 20;
+  else if (album.provider === 'deezer') score += 16;
   return score;
 }
 
@@ -1810,6 +1916,72 @@ function saveAlbumCover(title, artist, coverUrl, source = '') {
        source = excluded.source,
        updated_at = excluded.updated_at`
   ).run(key, clampText(title, 160), clampText(artist, 160), safeCoverUrl, clampText(source, 80), nowIso());
+  return safeCoverUrl;
+}
+
+function safeCoverUrlList(values) {
+  return uniqueBy((values || []).map(safeExternalImageUrl).filter(Boolean), (coverUrl) => coverUrl);
+}
+
+function storedAlbumCoverCandidates(title, artist) {
+  const key = albumKey(title, artist);
+  if (!key) return [];
+  const rows = [
+    ...db.prepare('SELECT cover_url FROM album_cover_cache WHERE album_key = ?').all(key),
+    ...db.prepare('SELECT cover_url FROM album_metadata_cache WHERE album_key = ?').all(key)
+  ];
+  return safeCoverUrlList(rows.map((row) => row.cover_url));
+}
+
+function matchingExploreCoverRows(title, artist, coverUrl) {
+  return db
+    .prepare('SELECT slug, album_index FROM explore_album_covers WHERE title = ? AND artist = ? AND cover_url = ?')
+    .all(title || '', artist || '', coverUrl || '');
+}
+
+function clearExploreCoverMemory(rows) {
+  for (const row of rows) {
+    exploreCoverMemoryCache.delete(`${row.slug}:${row.album_index}`);
+  }
+}
+
+function clearBadAlbumCoverReferences(title, artist, badCoverUrls = []) {
+  const key = albumKey(title, artist);
+  const badUrls = safeCoverUrlList(badCoverUrls);
+  if (!key || !badUrls.length) return;
+  for (const badUrl of badUrls) {
+    db.prepare('DELETE FROM album_cover_cache WHERE album_key = ? AND cover_url = ?').run(key, badUrl);
+    db.prepare("UPDATE album_metadata_cache SET cover_url = '' WHERE album_key = ? AND cover_url = ?").run(key, badUrl);
+    db.prepare("UPDATE list_albums SET cover_url = '' WHERE album_key = ? AND cover_url = ?").run(key, badUrl);
+    db.prepare("UPDATE user_album_activity SET cover_url = '' WHERE album_key = ? AND cover_url = ?").run(key, badUrl);
+    const exploreRows = matchingExploreCoverRows(title, artist, badUrl);
+    clearExploreCoverMemory(exploreRows);
+    db.prepare("UPDATE explore_album_covers SET cover_url = '' WHERE title = ? AND artist = ? AND cover_url = ?").run(
+      title || '',
+      artist || '',
+      badUrl
+    );
+  }
+}
+
+function repairAlbumCoverReferences(title, artist, coverUrl, badCoverUrls = [], source = 'cover-repair') {
+  const key = albumKey(title, artist);
+  const safeCoverUrl = safeExternalImageUrl(coverUrl);
+  if (!key || !safeCoverUrl) return '';
+  saveCanonicalAlbumMetadata({ title, artist, coverUrl: safeCoverUrl }, source);
+  const oldValues = uniqueBy(['', ...safeCoverUrlList(badCoverUrls)], (value) => value);
+  for (const oldCoverUrl of oldValues) {
+    db.prepare('UPDATE list_albums SET cover_url = ? WHERE album_key = ? AND cover_url = ?').run(safeCoverUrl, key, oldCoverUrl);
+    db.prepare('UPDATE user_album_activity SET cover_url = ? WHERE album_key = ? AND cover_url = ?').run(safeCoverUrl, key, oldCoverUrl);
+    const exploreRows = matchingExploreCoverRows(title, artist, oldCoverUrl);
+    clearExploreCoverMemory(exploreRows);
+    db.prepare('UPDATE explore_album_covers SET cover_url = ? WHERE title = ? AND artist = ? AND cover_url = ?').run(
+      safeCoverUrl,
+      title || '',
+      artist || '',
+      oldCoverUrl
+    );
+  }
   return safeCoverUrl;
 }
 
@@ -1874,13 +2046,20 @@ function saveCanonicalAlbumTracks(albumInput, source = '') {
 
 async function resolveVerifiedAlbumCover(title, artist, country = 'US', excludedUrls = []) {
   const excluded = new Set(excludedUrls.map(safeExternalImageUrl).filter(Boolean));
-  const cached = cachedAlbumCover(title, artist);
-  if (cached && !excluded.has(cached)) return cached;
+  const rejected = new Set(excluded);
+  for (const cached of storedAlbumCoverCandidates(title, artist)) {
+    if (excluded.has(cached)) continue;
+    if (await imageUrlWorks(cached)) return saveAlbumCover(title, artist, cached, 'verified-cache');
+    rejected.add(cached);
+  }
+  if (rejected.size) clearBadAlbumCoverReferences(title, artist, [...rejected]);
   for (const album of await albumCoverCandidates(title, artist, country)) {
     const coverUrl = safeExternalImageUrl(album.coverUrl);
-    if (!coverUrl || excluded.has(coverUrl)) continue;
+    if (!coverUrl || excluded.has(coverUrl) || rejected.has(coverUrl)) continue;
     if (await imageUrlWorks(coverUrl)) return saveAlbumCover(title, artist, coverUrl, album.provider || 'metadata');
+    rejected.add(coverUrl);
   }
+  if (rejected.size) clearBadAlbumCoverReferences(title, artist, [...rejected]);
   return '';
 }
 
@@ -2966,6 +3145,20 @@ function exploreAlbumPayload(album, index, statuses, cachedCovers, canonicalCove
   };
 }
 
+function persistKnownExploreCovers(list, cachedCovers, canonicalCovers) {
+  for (const [index, album] of list.albums.entries()) {
+    const key = albumKey(album.title, album.artist);
+    const coverUrl =
+      safeExternalImageUrl(album.coverUrl) ||
+      safeExternalImageUrl(cachedCovers.get(index)) ||
+      safeExternalImageUrl(canonicalCovers.get(key));
+    if (coverUrl && coverUrl !== safeExternalImageUrl(cachedCovers.get(index))) {
+      saveExploreCover(list.slug, index, album, coverUrl);
+      cachedCovers.set(index, coverUrl);
+    }
+  }
+}
+
 function exploreListWithCachedCovers(list, user = null) {
   const cached = new Map(
     db
@@ -2975,6 +3168,7 @@ function exploreListWithCachedCovers(list, user = null) {
   );
   const statuses = exploreAlbumStatuses(user);
   const canonicalCovers = canonicalCoverMapForAlbumKeys(list.albums.map((album) => albumKey(album.title, album.artist)));
+  persistKnownExploreCovers(list, cached, canonicalCovers);
   return {
     ...list,
     albums: list.albums.map((album, index) => exploreAlbumPayload(album, index, statuses, cached, canonicalCovers))
@@ -3028,15 +3222,25 @@ async function resolveExploreCover(slug, albumIndex, album, options = {}) {
   const force = Boolean(options.force);
   const providedCoverUrl = safeExternalImageUrl(album.coverUrl);
   if (!force && providedCoverUrl) {
-    saveExploreCover(slug, albumIndex, album, providedCoverUrl);
-    return providedCoverUrl;
+    if (await imageUrlWorks(providedCoverUrl)) {
+      saveExploreCover(slug, albumIndex, album, providedCoverUrl);
+      return providedCoverUrl;
+    }
+    clearBadAlbumCoverReferences(album.title, album.artist, [providedCoverUrl]);
   }
   const cached = force ? null : cachedExploreCover(slug, albumIndex);
-  if (cached !== null) return cached;
+  if (cached !== null) {
+    if (await imageUrlWorks(cached)) return cached;
+    clearExploreCover(slug, albumIndex);
+    clearBadAlbumCoverReferences(album.title, album.artist, [cached]);
+  }
   const albumCached = force ? '' : cachedAlbumCover(album.title, album.artist);
   if (albumCached) {
-    saveExploreCover(slug, albumIndex, album, albumCached);
-    return albumCached;
+    if (await imageUrlWorks(albumCached)) {
+      saveExploreCover(slug, albumIndex, album, albumCached);
+      return albumCached;
+    }
+    clearBadAlbumCoverReferences(album.title, album.artist, [albumCached]);
   }
   const candidates = [];
   const spotifyCover = await spotifyAlbumCover(album.spotifyId);
@@ -3165,7 +3369,7 @@ function syncHydratedAlbumToLists(albumInput) {
   }
 }
 
-async function hydratedAlbumInputForKey(albumKeyValue, req) {
+async function hydratedAlbumInputForKey(albumKeyValue, req, options = {}) {
   const metadata = viewerAlbumMetadata(albumKeyValue, req.user);
   if (!metadata) throw httpError(404, 'Album not found.');
 
@@ -3174,29 +3378,54 @@ async function hydratedAlbumInputForKey(albumKeyValue, req) {
 
   const artist = clampText(metadata.artist, 160);
   const source = exploreAlbumSourceByKey(albumKeyValue);
-  let coverUrl = safeExternalImageUrl(metadata.cover_url) || cachedAlbumCover(title, artist);
+  const rejectedCoverUrls = new Set(safeCoverUrlList(options.brokenCoverUrls || []));
+  const forceCoverRefresh = Boolean(options.forceCoverRefresh);
+  const fast = Boolean(options.fast);
+  let coverUrl = '';
+  const storedCoverUrl = safeExternalImageUrl(metadata.cover_url) || cachedAlbumCover(title, artist);
+  if (storedCoverUrl) {
+    if (fast && !forceCoverRefresh && !rejectedCoverUrls.has(storedCoverUrl)) {
+      coverUrl = storedCoverUrl;
+    } else if (!forceCoverRefresh && !rejectedCoverUrls.has(storedCoverUrl) && (await imageUrlWorks(storedCoverUrl))) {
+      coverUrl = storedCoverUrl;
+    } else {
+      rejectedCoverUrls.add(storedCoverUrl);
+      clearBadAlbumCoverReferences(title, artist, [...rejectedCoverUrls]);
+    }
+  }
   let tracks = existingTracksForAlbumKey(albumKeyValue);
   let usedAlbumLookupRateLimit = false;
 
-  if (!coverUrl && source) {
+  if (!coverUrl && source && !forceCoverRefresh) {
     limitExploreCoverLookup(req);
     coverUrl = await resolveExploreCover(source.list.slug, source.index, source.album).catch(() => '');
+    if (coverUrl && rejectedCoverUrls.has(coverUrl)) coverUrl = '';
   }
 
-  if (!tracks.length) {
+  if (!fast && !tracks.length) {
     usedAlbumLookupRateLimit = true;
     const hydrated = await hydrateAlbumInputTracks({ title, artist, coverUrl }, req);
     tracks = sanitizeTracks(hydrated?.tracks);
-    coverUrl = safeExternalImageUrl(hydrated?.coverUrl || hydrated?.cover_url) || coverUrl;
+    const hydratedCoverUrl = safeExternalImageUrl(hydrated?.coverUrl || hydrated?.cover_url);
+    if (hydratedCoverUrl && !rejectedCoverUrls.has(hydratedCoverUrl)) {
+      if (await imageUrlWorks(hydratedCoverUrl)) coverUrl = hydratedCoverUrl;
+      else rejectedCoverUrls.add(hydratedCoverUrl);
+    }
   }
 
-  if (!coverUrl) {
+  if (!fast && !coverUrl) {
     if (!usedAlbumLookupRateLimit) limitAlbumLookup(req);
-    coverUrl = await resolveVerifiedAlbumCover(title, artist).catch(() => '');
+    coverUrl = await resolveVerifiedAlbumCover(title, artist, itunesCountry(req), [...rejectedCoverUrls]).catch(() => '');
   }
 
   if (coverUrl) {
-    saveAlbumCover(title, artist, coverUrl, source ? `explore:${source.list.slug}` : 'album-detail');
+    repairAlbumCoverReferences(
+      title,
+      artist,
+      coverUrl,
+      [...rejectedCoverUrls],
+      source ? `explore:${source.list.slug}` : 'album-detail'
+    );
     if (source) saveExploreCover(source.list.slug, source.index, source.album, coverUrl);
   }
 
@@ -3208,7 +3437,8 @@ async function hydratedAlbumInputForKey(albumKeyValue, req) {
     title,
     artist,
     cover_url: coverUrl,
-    tracks
+    tracks,
+    hydration_pending: Boolean(fast && (!tracks.length || !coverUrl))
   };
 }
 
@@ -3277,6 +3507,7 @@ function buildCanonicalAlbumPayload(album, user) {
     coverUrl: safeExternalImageUrl(album.cover_url),
     externalUrl: albumExternalUrl(album, user?.musicPlatform || 'na'),
     tracks: album.tracks.map((track, index) => trackPayloadForAlbum(albumKeyValue, track, index, user)),
+    hydrationPending: Boolean(album.hydration_pending),
     currentUserCompleted: Boolean(user && userAlbumFullyListened(user.id, albumKeyValue)),
     currentUserFullyRated: Boolean(user && userAlbumFullyRated(user.id, albumKeyValue)),
     currentUserAverageOptIn: optInRow ? Boolean(optInRow.include_in_average) : true,
@@ -3504,9 +3735,28 @@ app.get('/api/explore', (req, res) => {
 app.get(
   '/api/albums/by-key/:albumKey',
   route(async (req, res) => {
-    const album = await hydratedAlbumInputForKey(req.params.albumKey, req);
+    const album = await hydratedAlbumInputForKey(req.params.albumKey, req, {
+      fast: req.query.fast === '1' || req.query.fast === 'true'
+    });
     res.setHeader('Cache-Control', req.user ? 'private, no-cache' : 'no-store');
     res.json({ album: buildCanonicalAlbumPayload(album, req.user) });
+  })
+);
+
+app.post(
+  '/api/albums/by-key/:albumKey/cover/refresh',
+  route(async (req, res) => {
+    limitDbWrite(req, 'canonical-cover-refresh');
+    const album = await hydratedAlbumInputForKey(req.params.albumKey, req, {
+      forceCoverRefresh: req.body?.force === true,
+      brokenCoverUrls: [req.body?.brokenUrl]
+    });
+    res.setHeader('Cache-Control', req.user ? 'private, no-cache' : 'no-store');
+    res.json({
+      ok: true,
+      coverUrl: safeExternalImageUrl(album.cover_url),
+      album: buildCanonicalAlbumPayload(album, req.user)
+    });
   })
 );
 
@@ -3716,7 +3966,7 @@ app.get(
     const list = exploreListBySlug(req.params.slug);
     if (!list) throw httpError(404, 'Explore list not found.');
     const offset = Math.max(0, Number(req.query.offset || 0) || 0);
-    const limit = Math.min(12, Math.max(1, Number(req.query.limit || 12) || 12));
+    const limit = Math.min(24, Math.max(1, Number(req.query.limit || 24) || 24));
     const slice = list.albums.slice(offset, offset + limit);
     const covers = await Promise.all(slice.map(async (album, index) => ({
       index: offset + index,
@@ -3734,7 +3984,7 @@ app.post(
     const list = exploreListBySlug(req.params.slug);
     if (!list) throw httpError(404, 'Explore list not found.');
     const offset = Math.max(0, Number(req.body?.offset || 0) || 0);
-    const limit = Math.min(12, Math.max(1, Number(req.body?.limit || 12) || 12));
+    const limit = Math.min(24, Math.max(1, Number(req.body?.limit || 24) || 24));
     const slice = list.albums.slice(offset, offset + limit);
     const covers = await Promise.all(
       slice.map(async (album, index) => ({
@@ -4390,11 +4640,13 @@ app.post(
 
     const force = req.body?.force === true;
     const currentCoverUrl = safeExternalImageUrl(album.cover_url);
+    const excludedCoverUrls = safeCoverUrlList([req.body?.brokenUrl, force ? currentCoverUrl : '']);
     const currentStillWorks = !force && currentCoverUrl ? await imageUrlWorks(currentCoverUrl) : false;
+    if (!currentStillWorks && currentCoverUrl) excludedCoverUrls.push(currentCoverUrl);
     const refreshedCoverUrl = currentStillWorks
       ? currentCoverUrl
-      : await resolveVerifiedAlbumCover(album.title, album.artist, itunesCountry(req), force ? [currentCoverUrl, req.body?.brokenUrl] : []);
-    const nextCoverUrl = refreshedCoverUrl || (force ? '' : currentCoverUrl);
+      : await resolveVerifiedAlbumCover(album.title, album.artist, itunesCountry(req), excludedCoverUrls);
+    const nextCoverUrl = refreshedCoverUrl || (currentStillWorks ? currentCoverUrl : '');
 
     transaction(() => {
       db.prepare('UPDATE list_albums SET cover_url = ?, updated_at = ? WHERE id = ? AND list_id = ?').run(
@@ -4405,6 +4657,7 @@ app.post(
       );
       db.prepare('UPDATE lists SET updated_at = ? WHERE id = ?').run(nowIso(), list.id);
     })();
+    if (refreshedCoverUrl) repairAlbumCoverReferences(album.title, album.artist, refreshedCoverUrl, excludedCoverUrls, 'cover-refresh');
 
     res.json({
       coverUrl: nextCoverUrl,

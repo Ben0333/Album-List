@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { router, navigate } from '$lib/router.svelte';
+  import { router, navigate, followInternalLink } from '$lib/router.svelte';
   import { api, getErrorMessage } from '$lib/api';
   import { addGuestAlbum } from '$lib/guest';
   import { appState } from '$lib/state.svelte';
@@ -23,6 +23,7 @@
   let shuffleBusy = $state<boolean>(false);
   let albumBusy = $state<boolean>(false);
   let albumError = $state<string>('');
+  const failedExploreCoverUrls = new Set<string>();
 
   $effect(() => {
     const route = router.current;
@@ -36,7 +37,10 @@
     detailData = null;
     const promise = slug
       ? api.get<ExploreDetailPayload>(`/api/explore/${encodeURIComponent(slug)}`).then((data) => {
-          if (!cancelled) detailData = data.list;
+          if (!cancelled) {
+            detailData = data.list;
+            void warmMissingExploreCovers(data.list.slug, () => cancelled);
+          }
         })
       : api.get<ExploreIndexPayload>('/api/explore').then((data) => {
           if (!cancelled) indexData = data;
@@ -68,6 +72,63 @@
     return album.releaseYear ? `${artist} - ${album.releaseYear}` : artist;
   }
 
+  async function warmMissingExploreCovers(listSlug: string, isCancelled: () => boolean): Promise<void> {
+    let offset = 0;
+    const limit = 24;
+    while (!isCancelled()) {
+      const list = detailData;
+      if (!list || list.slug !== listSlug) return;
+      const nextMissing = list.albums.findIndex((album, index) => index >= offset && !album.coverUrl);
+      if (nextMissing === -1) return;
+      try {
+        const data = await api.post<{
+          covers: Array<{ index: number; coverUrl: string | null }>;
+          nextOffset: number;
+          total: number;
+        }>(`/api/explore/${encodeURIComponent(listSlug)}/covers/warm`, {
+          offset: nextMissing,
+          limit
+        });
+        if (isCancelled()) return;
+        const current = detailData;
+        if (!current || current.slug !== listSlug) return;
+        const coverMap = new Map(data.covers.map((item) => [item.index, item.coverUrl]));
+        detailData = {
+          ...current,
+          albums: current.albums.map((album, index) => {
+            const coverUrl = coverMap.get(index);
+            return coverUrl ? { ...album, coverUrl } : album;
+          })
+        };
+        offset = data.nextOffset;
+        if (offset >= data.total) return;
+        await new Promise((resolve) => window.setTimeout(resolve, 100));
+      } catch {
+        return;
+      }
+    }
+  }
+
+  async function refreshExploreCover(index: number, brokenUrl: string): Promise<void> {
+    const list = detailData;
+    if (!list || failedExploreCoverUrls.has(`${list.slug}:${index}:${brokenUrl}`)) return;
+    failedExploreCoverUrls.add(`${list.slug}:${index}:${brokenUrl}`);
+    try {
+      const data = await api.post<{ index: number; coverUrl: string | null }>(
+        `/api/explore/${encodeURIComponent(list.slug)}/covers/${index}/refresh`
+      );
+      if (!data.coverUrl || data.coverUrl === brokenUrl || !detailData || detailData.slug !== list.slug) return;
+      detailData = {
+        ...detailData,
+        albums: detailData.albums.map((album, albumIndex) =>
+          albumIndex === data.index ? { ...album, coverUrl: data.coverUrl } : album
+        )
+      };
+    } catch {
+      // Keep the initials fallback if automatic repair cannot find a replacement.
+    }
+  }
+
   function albumStatus(album: ExploreAlbum): string {
     if (album.currentUserCompleted) return 'Listened';
     if (album.currentUserRatingCount) return `Your rating ${album.currentUserRatingAverage}/10`;
@@ -97,20 +158,16 @@
     if (list.listenCount) parts.push(`${list.listenCount} listens`);
     return parts.join(' • ');
   }
-  function openPopularList(list: PopularList): void {
-    if (list.shareToken) {
-      navigate(`/share/${encodeURIComponent(list.shareToken)}`);
-      return;
-    }
-    navigate(`/list/${list.id}`);
+  function popularListPath(list: PopularList): string {
+    return list.shareToken ? `/share/${encodeURIComponent(list.shareToken)}` : `/list/${list.id}`;
   }
 
-  function openAlbum(album: ExploreAlbum, index: number): void {
-    if (album.albumKey) {
-      navigate(`/album/${encodeURIComponent(album.albumKey)}`);
-      return;
-    }
-    if (detailData) navigate(`/explore/${encodeURIComponent(detailData.slug)}/album/${index}`);
+  function albumPath(album: ExploreAlbum, index: number): string {
+    return album.albumKey
+      ? `/album/${encodeURIComponent(album.albumKey)}`
+      : detailData
+        ? `/explore/${encodeURIComponent(detailData.slug)}/album/${index}`
+        : '/explore';
   }
 
   async function shuffleExplore(currentSlug?: string): Promise<void> {
@@ -154,7 +211,7 @@
 </script>
 
 {#if loading && !indexData && !detailData}
-  <Placeholder title="Loading…" />
+  <Placeholder title="Loading..." />
 {:else if loadError}
   <Placeholder title="Could not load explore" note={loadError} />
 {:else if currentAlbum && detailData}
@@ -167,7 +224,13 @@
       onclick={() => navigate(`/explore/${encodeURIComponent(detailData!.slug)}`)}
     />
     <section class="album-hero">
-      <Cover title={album.title} coverUrl={album.coverUrl} />
+      <Cover
+        title={album.title}
+        coverUrl={album.coverUrl}
+        onfail={(url) => {
+          if (albumIndex !== null) void refreshExploreCover(albumIndex, url);
+        }}
+      />
       <div>
         <h1>{album.title}</h1>
         <p>{albumSubtitle(album)}</p>
@@ -220,14 +283,15 @@
         <article class="album-item">
           <div class="album-line">
             <div class="rank-number">{index + 1}</div>
-            <Cover title={album.title} coverUrl={album.coverUrl} />
-            <button
+            <Cover title={album.title} coverUrl={album.coverUrl} onfail={(url) => refreshExploreCover(index, url)} />
+            <a
               class="album-title"
-              onclick={() => openAlbum(album, index)}
+              href={albumPath(album, index)}
+              onclick={(event) => followInternalLink(event, albumPath(album, index))}
             >
               <strong>{album.title}</strong>
               <span>{albumSubtitle(album)}</span>
-            </button>
+            </a>
             {#if status}
               <span class="pill done">{status}</span>
             {/if}
@@ -247,11 +311,15 @@
     <h1>Explore</h1>
     <section class="explore-grid">
       {#each indexData.lists as list (list.slug)}
-        <button class="explore-card" onclick={() => navigate(`/explore/${encodeURIComponent(list.slug)}`)}>
+        <a
+          class="explore-card"
+          href={`/explore/${encodeURIComponent(list.slug)}`}
+          onclick={(event) => followInternalLink(event, `/explore/${encodeURIComponent(list.slug)}`)}
+        >
           <strong>{list.name}</strong>
           <span>{list.description}</span>
           <small>{list.albumCount} albums</small>
-        </button>
+        </a>
       {/each}
     </section>
     {#if indexData.popularLists.length}
@@ -261,10 +329,14 @@
           {#each indexData.popularLists as list (list.id)}
             <article class="album-item">
               <div class="album-line">
-                <button class="album-title" onclick={() => openPopularList(list)}>
+                <a
+                  class="album-title"
+                  href={popularListPath(list)}
+                  onclick={(event) => followInternalLink(event, popularListPath(list))}
+                >
                   <strong>{list.name}</strong>
                   <span>by {list.ownerUsername} - {listSummary(list)}</span>
-                </button>
+                </a>
               </div>
             </article>
           {/each}

@@ -13,6 +13,8 @@
   let loadError = $state<string>('');
   let busy = $state<boolean>(false);
   let pageError = $state<string>('');
+  let coverRepairing = $state<boolean>(false);
+  const failedCoverUrls = new Set<string>();
 
   $effect(() => {
     const route = router.current;
@@ -24,9 +26,21 @@
     pageError = '';
     album = null;
     api
-      .get<AlbumDetailPayload>(`/api/albums/by-key/${encodeURIComponent(albumKey)}`)
+      .get<AlbumDetailPayload>(`/api/albums/by-key/${encodeURIComponent(albumKey)}?fast=1`)
       .then((data) => {
-        if (!cancelled) album = data.album;
+        if (cancelled) return;
+        album = data.album;
+        if (data.album.hydrationPending) {
+          void api
+            .get<AlbumDetailPayload>(`/api/albums/by-key/${encodeURIComponent(albumKey)}`)
+            .then((next) => {
+              const currentRoute = router.current;
+              if (!cancelled && currentRoute.type === 'album' && currentRoute.albumKey === albumKey) album = next.album;
+            })
+            .catch(() => {
+              // Keep the fast preview visible if the slower metadata hydration fails.
+            });
+        }
       })
       .catch((err: unknown) => {
         if (cancelled) return;
@@ -53,6 +67,23 @@
 
   function setAlbum(next: { album: AlbumDetail }): void {
     album = next.album;
+  }
+
+  async function repairBrokenCover(brokenUrl: string): Promise<void> {
+    if (!album || coverRepairing || failedCoverUrls.has(brokenUrl)) return;
+    failedCoverUrls.add(brokenUrl);
+    coverRepairing = true;
+    try {
+      const data = await api.post<{ ok: boolean; album: AlbumDetail; coverUrl: string }>(
+        `/api/albums/by-key/${encodeURIComponent(album.albumKey)}/cover/refresh`,
+        { brokenUrl, force: true }
+      );
+      if (data.album.coverUrl && data.album.coverUrl !== brokenUrl) setAlbum(data);
+    } catch {
+      // Keep the initials fallback; cover repair can be retried on a later view.
+    } finally {
+      coverRepairing = false;
+    }
   }
 
   function openListPicker(): void {
@@ -163,45 +194,59 @@
 </script>
 
 {#if loading && !album}
-  <Placeholder title="Loadingâ€¦" />
+  <Placeholder title="Loading..." />
 {:else if loadError}
   <Placeholder title="Could not load album" note={loadError} />
 {:else if album}
   {@const a = album}
-  {@const yourRating = a.currentUserAggregate?.count ? `Your rating ${a.currentUserAggregate.average}/10` : ''}
-  {@const turntableAverage = a.aggregate?.average !== null && a.aggregate?.average !== undefined ? `Turntable average ${a.aggregate.average}/10` : ''}
-  {@const libraryLabel = a.currentUserLibrary
-    ? a.currentUserLibrary.ratingCount
-      ? `In your list - ${a.currentUserLibrary.average}/10`
-      : 'In your list'
-    : ''}
+  {@const yourRatingValue = a.currentUserAggregate?.count ? `${a.currentUserAggregate.average}/10` : ''}
+  {@const turntableRatingValue = a.aggregate?.average !== null && a.aggregate?.average !== undefined ? `${a.aggregate.average}/10` : ''}
+  {@const turntableAverage = turntableRatingValue ? `Turntable average ${turntableRatingValue}` : ''}
+  {@const inLibrary = Boolean(a.currentUserLibrary)}
   <main class="page-shell detail-shell">
     <IconButton icon="arrow-left" label="Back" className="text-button back-link" onclick={back} />
     <section class="album-hero">
-      <Cover title={a.title} coverUrl={a.coverUrl} />
+      <Cover title={a.title} coverUrl={a.coverUrl} onfail={repairBrokenCover} />
       <div>
         <h1>{a.title}</h1>
         <p>{a.artist || 'Unknown artist'}</p>
-        <div class="button-row left">
-          {#if yourRating}<span class="pill done">{yourRating}</span>{/if}
-          {#if turntableAverage}<span class="pill">{turntableAverage}</span>{/if}
-          {#if a.externalUrl}
-            <a class="pill link-pill" href={a.externalUrl} target="_blank" rel="noreferrer">Open</a>
+        <div class="album-meta">
+          {#if yourRatingValue || turntableRatingValue || inLibrary}
+            <div class="album-rating-summary">
+              {#if yourRatingValue}
+                <span class="album-rating-chip is-mine">
+                  <span>Your rating</span>
+                  <strong>{yourRatingValue}</strong>
+                </span>
+              {/if}
+              {#if turntableRatingValue}
+                <span class="album-rating-chip">
+                  <span>Turntable</span>
+                  <strong>{turntableRatingValue}</strong>
+                </span>
+              {/if}
+              {#if inLibrary}
+                <span class="album-library-chip">In your list</span>
+              {/if}
+            </div>
           {/if}
-          {#if canRate}
-            <IconButton
-              icon="headphones"
-              label={a.currentUserCompleted ? 'Listened' : 'Listen'}
-              className={`pill ${a.currentUserCompleted ? 'done' : ''}`}
-              disabled={busy}
-              onclick={toggleListened}
-            />
-          {/if}
-          {#if libraryLabel}
-            <span class="pill done">{libraryLabel}</span>
-          {:else if appState.user}
-            <IconButton icon="plus" label="Add to library" className="pill" onclick={openListPicker} />
-          {/if}
+          <div class="button-row left album-action-row">
+            {#if a.externalUrl}
+              <a class="pill link-pill" href={a.externalUrl} target="_blank" rel="noreferrer">Open</a>
+            {/if}
+            {#if canRate}
+              <IconButton
+                icon="headphones"
+                label={a.currentUserCompleted ? 'Listened' : 'Listen'}
+                className={`pill ${a.currentUserCompleted ? 'done' : ''}`}
+                disabled={busy}
+                onclick={toggleListened}
+              />
+            {/if}
+            {#if !inLibrary && appState.user}
+              <IconButton icon="plus" label="Add to library" className="pill" onclick={openListPicker} />
+            {/if}
+          </div>
         </div>
       </div>
     </section>
@@ -243,6 +288,8 @@
             </div>
           {/each}
         </div>
+      {:else if a.hydrationPending}
+        <div class="empty-minimal small">Loading track list...</div>
       {:else if canRate}
         <div class="album-rating-panel">
           <div class="track-row album-rating-row">
@@ -264,5 +311,68 @@
 <style>
   .error-line {
     color: var(--danger);
+  }
+
+  .album-meta {
+    display: grid;
+    gap: 10px;
+  }
+
+  .album-rating-summary {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .album-rating-chip,
+  .album-library-chip {
+    min-height: 34px;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: color-mix(in srgb, var(--panel) 84%, transparent);
+  }
+
+  .album-rating-chip {
+    min-width: 112px;
+    display: grid;
+    gap: 1px;
+    padding: 6px 10px;
+  }
+
+  .album-rating-chip span {
+    color: var(--muted);
+    font-size: 0.68rem;
+    font-weight: 750;
+    line-height: 1;
+    text-transform: uppercase;
+  }
+
+  .album-rating-chip strong {
+    color: var(--text);
+    font-size: 1rem;
+    line-height: 1;
+  }
+
+  .album-rating-chip.is-mine {
+    border-color: color-mix(in srgb, var(--blue) 62%, var(--line));
+    background: color-mix(in srgb, var(--blue) 10%, var(--panel));
+  }
+
+  .album-rating-chip.is-mine strong,
+  .album-library-chip {
+    color: var(--blue-strong);
+  }
+
+  .album-library-chip {
+    display: inline-grid;
+    place-items: center;
+    padding: 0 10px;
+    font-size: 0.78rem;
+    font-weight: 750;
+  }
+
+  .album-action-row {
+    gap: 8px;
   }
 </style>

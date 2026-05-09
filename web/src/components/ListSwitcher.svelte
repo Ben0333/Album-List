@@ -1,6 +1,6 @@
 <script lang="ts">
   import { appState } from '$lib/state.svelte';
-  import { navigate } from '$lib/router.svelte';
+  import { navigate, followInternalLink } from '$lib/router.svelte';
 
   interface Props {
     activeListId: number;
@@ -18,9 +18,13 @@
   {#if appState.lists.length <= 5}
     <div class="list-switcher" aria-label="Switch list">
       {#each appState.lists as list (list.id)}
-        <button class:active={list.id === activeListId} onclick={() => navigate(`/list/${list.id}`)}>
+        <a
+          class:active={list.id === activeListId}
+          href={`/list/${list.id}`}
+          onclick={(event) => followInternalLink(event, `/list/${list.id}`)}
+        >
           {list.name}
-        </button>
+        </a>
       {/each}
     </div>
   {:else}

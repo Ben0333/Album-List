@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { router, navigate } from '$lib/router.svelte';
+  import { router, navigate, followInternalLink } from '$lib/router.svelte';
   import { api, getErrorMessage } from '$lib/api';
   import type { HistoryCompletion, HistoryPayload } from '$lib/types';
   import IconButton from '../components/IconButton.svelte';
@@ -55,10 +55,17 @@
         : '';
     return average ? `${artist} - ${average}` : artist;
   }
+
+  function historyAlbumPath(item: HistoryCompletion): string {
+    const route = router.current;
+    return route.type === 'history'
+      ? `/history/${encodeURIComponent(route.token)}/album/${encodeURIComponent(item.albumKey)}`
+      : '/';
+  }
 </script>
 
 {#if loading && !history}
-  <Placeholder title="Loading…" />
+  <Placeholder title="Loading..." />
 {:else if loadError}
   <Placeholder title="Could not load history" note={loadError} />
 {:else if focused && history}
@@ -105,17 +112,14 @@
           <article class="album-item">
             <div class="album-line">
               <Cover title={item.title} coverUrl={item.coverUrl} />
-              <button
+              <a
                 class="album-title"
-                onclick={() => {
-                  const route = router.current;
-                  if (route.type !== 'history') return;
-                  navigate(`/history/${encodeURIComponent(route.token)}/album/${encodeURIComponent(item.albumKey)}`);
-                }}
+                href={historyAlbumPath(item)}
+                onclick={(event) => followInternalLink(event, historyAlbumPath(item))}
               >
                 <strong>{item.title}</strong>
                 <span>{rowSubtitle(item)}</span>
-              </button>
+              </a>
             </div>
           </article>
         {/each}

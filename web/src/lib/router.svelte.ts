@@ -81,3 +81,9 @@ export function navigate(to: string, options: { replace?: boolean } = {}): void 
   _route = parseRoute();
   restoreScrollForCurrentRoute({ fallbackToTop: !hasSavedTargetScroll });
 }
+
+export function followInternalLink(event: MouseEvent, to: string, options: { replace?: boolean } = {}): void {
+  if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+  event.preventDefault();
+  navigate(to, options);
+}

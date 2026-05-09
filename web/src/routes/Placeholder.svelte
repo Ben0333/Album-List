@@ -8,5 +8,5 @@
 
 <main class="page-shell">
   <h1>{title}</h1>
-  <div class="empty-minimal">{note ?? 'Loading…'}</div>
+  <div class="empty-minimal">{note ?? 'Loading...'}</div>
 </main>

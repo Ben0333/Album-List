@@ -71,7 +71,7 @@
 </script>
 
 {#if loading && !profile}
-  <Placeholder title="Loading…" />
+  <Placeholder title="Loading..." />
 {:else if loadError}
   <Placeholder title="Could not load profile" note={loadError} />
 {:else if !album}

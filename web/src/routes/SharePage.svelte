@@ -42,7 +42,7 @@
 </script>
 
 {#if loading && !payload}
-  <Placeholder title="Loading…" />
+  <Placeholder title="Loading..." />
 {:else if loadError}
   <Placeholder title="Could not load shared list" note={loadError} />
 {:else if payload}

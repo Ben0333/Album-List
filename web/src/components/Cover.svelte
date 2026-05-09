@@ -5,16 +5,19 @@
     title: string;
     coverUrl?: string | null;
     size?: 'normal' | 'tiny';
+    onfail?: (url: string) => void;
   }
 
-  let { title, coverUrl, size = 'normal' }: Props = $props();
+  let { title, coverUrl, size = 'normal', onfail }: Props = $props();
 
   const className = $derived(size === 'tiny' ? 'tiny-cover' : 'cover');
   let failedUrl = $state<string | null>(null);
   const usableCoverUrl = $derived(coverUrl && failedUrl !== coverUrl ? coverUrl : '');
 
   function markFailed(): void {
-    failedUrl = coverUrl || null;
+    const url = coverUrl || null;
+    failedUrl = url;
+    if (url) onfail?.(url);
   }
 </script>
 

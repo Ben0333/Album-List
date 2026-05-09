@@ -1,6 +1,6 @@
 <script lang="ts">
   import { initials } from '$lib/initials';
-  import { navigate } from '$lib/router.svelte';
+  import { followInternalLink } from '$lib/router.svelte';
 
   interface Member {
     username: string;
@@ -19,19 +19,17 @@
   const klass = $derived(`avatar ${complete ? '' : 'pending'}`);
   const bg = $derived(member.avatarColor || '#2563eb');
 
-  function open(): void {
-    navigate(`/u/${encodeURIComponent(member.username)}`);
-  }
+  const profilePath = $derived(`/u/${encodeURIComponent(member.username)}`);
 </script>
 
 {#if clickable && member.username}
-  <button class={klass} style:background={bg} title={member.username} onclick={open}>
+  <a class={klass} style:background={bg} title={member.username} href={profilePath} onclick={(event) => followInternalLink(event, profilePath)}>
     {#if member.avatarUrl}
       <img src={member.avatarUrl} alt="" />
     {:else}
       {initials(member.username).slice(0, 2)}
     {/if}
-  </button>
+  </a>
 {:else}
   <span class={klass} style:background={bg} title={member.username}>
     {#if member.avatarUrl}

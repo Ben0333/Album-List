@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { router, navigate } from '$lib/router.svelte';
+  import { router, followInternalLink } from '$lib/router.svelte';
   import { api, getErrorMessage } from '$lib/api';
   import type { ProfileAlbum, ProfilePayload } from '$lib/types';
   import Avatar from '../components/Avatar.svelte';
@@ -59,10 +59,14 @@
     if (album.inCommon) parts.push('in common');
     return parts.join(' - ');
   }
+
+  function profileAlbumPath(album: ProfileAlbum): string {
+    return profile ? `/u/${encodeURIComponent(profile.user.username)}/album/${encodeURIComponent(album.albumKey)}` : '/';
+  }
 </script>
 
 {#if loading && !profile}
-  <Placeholder title="Loading…" />
+  <Placeholder title="Loading..." />
 {:else if loadError}
   <Placeholder title="Could not load profile" note={loadError} />
 {:else if profile}
@@ -85,10 +89,10 @@
           {#each profile.lists as list (list.id)}
             <article class="album-item">
               <div class="album-line">
-                <button class="album-title" onclick={() => navigate(`/list/${list.id}`)}>
+                <a class="album-title" href={`/list/${list.id}`} onclick={(event) => followInternalLink(event, `/list/${list.id}`)}>
                   <strong>{list.name}</strong>
                   <span>{list.albumCount} album{list.albumCount === 1 ? '' : 's'}</span>
-                </button>
+                </a>
               </div>
             </article>
           {/each}
@@ -123,14 +127,14 @@
             <article class="album-item" class:common={album.inCommon}>
               <div class="album-line">
                 <Cover title={album.title} coverUrl={album.coverUrl} />
-                <button
+                <a
                   class="album-title"
-                  onclick={() =>
-                    navigate(`/u/${encodeURIComponent(profile!.user.username)}/album/${encodeURIComponent(album.albumKey)}`)}
+                  href={profileAlbumPath(album)}
+                  onclick={(event) => followInternalLink(event, profileAlbumPath(album))}
                 >
                   <strong>{album.title}</strong>
                   <span>{albumSubtitle(album)}</span>
-                </button>
+                </a>
               </div>
             </article>
           {/each}
