@@ -1,6 +1,6 @@
 <script lang="ts">
   import type { ListAlbum, ListPayload } from '$lib/types';
-  import { navigate } from '$lib/router.svelte';
+  import { followInternalLink } from '$lib/router.svelte';
   import { api, getErrorMessage } from '$lib/api';
   import { appState } from '$lib/state.svelte';
   import Cover from './Cover.svelte';
@@ -17,6 +17,8 @@
 
   let { album, payload, highlighted = false, openPath = null, onPayloadUpdate }: Props = $props();
   let busy = $state<boolean>(false);
+  let coverRepairing = $state<boolean>(false);
+  const failedCoverUrls = new Set<string>();
 
   const subtitle: string = $derived.by(() => {
     const artist = album.artist || 'Unknown artist';
@@ -26,6 +28,8 @@
         : '';
     return average ? `${artist} - ${average}` : artist;
   });
+
+  const albumPath = $derived(openPath || `/album/${encodeURIComponent(album.albumKey)}`);
 
   const libraryLabel: string = $derived.by(() => {
     if (album.currentUserFullyRated && album.currentUserAggregate?.count) {
@@ -50,10 +54,6 @@
       ? `Voted ${album.removalVoteCount}/${album.removalVoteThreshold}`
       : `Remove ${album.removalVoteCount}/${album.removalVoteThreshold}`;
   });
-
-  function open(): void {
-    navigate(openPath || `/album/${encodeURIComponent(album.albumKey)}`);
-  }
 
   async function removeOrVote(): Promise<void> {
     if (busy || !canRemove) return;
@@ -81,15 +81,33 @@
     }
   }
 
+  async function repairBrokenCover(brokenUrl: string): Promise<void> {
+    if (!payload.permissions.canEdit || coverRepairing || failedCoverUrls.has(brokenUrl)) return;
+    failedCoverUrls.add(brokenUrl);
+    coverRepairing = true;
+    try {
+      const data = await api.post<{ ok: boolean; album: ListAlbum; coverUrl: string }>(
+        `/api/lists/${payload.list.id}/albums/${album.id}/cover/refresh`,
+        { brokenUrl, force: true }
+      );
+      const albums = payload.albums.map((item) => (item.id === data.album.id ? data.album : item));
+      onPayloadUpdate({ ...payload, albums });
+    } catch {
+      // Keep the local initials fallback if automatic repair cannot find a replacement.
+    } finally {
+      coverRepairing = false;
+    }
+  }
+
 </script>
 
 <article class="album-item" class:highlight={highlighted} data-album-id={album.id}>
   <div class="album-line">
-    <Cover title={album.title} coverUrl={album.coverUrl} />
-    <button class="album-title" onclick={open}>
+    <Cover title={album.title} coverUrl={album.coverUrl} onfail={repairBrokenCover} />
+    <a class="album-title" href={albumPath} onclick={(event) => followInternalLink(event, albumPath)}>
       <strong>{album.title}</strong>
       <span>{subtitle}</span>
-    </button>
+    </a>
     <Completion {album} {payload} {onPayloadUpdate} />
     {#if libraryLabel}
       <span class="pill done">{libraryLabel}</span>

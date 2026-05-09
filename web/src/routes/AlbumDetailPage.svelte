@@ -13,6 +13,8 @@
   let loadError = $state<string>('');
   let busy = $state<boolean>(false);
   let pageError = $state<string>('');
+  let coverRepairing = $state<boolean>(false);
+  const failedCoverUrls = new Set<string>();
 
   $effect(() => {
     const route = router.current;
@@ -53,6 +55,23 @@
 
   function setAlbum(next: { album: AlbumDetail }): void {
     album = next.album;
+  }
+
+  async function repairBrokenCover(brokenUrl: string): Promise<void> {
+    if (!album || coverRepairing || failedCoverUrls.has(brokenUrl)) return;
+    failedCoverUrls.add(brokenUrl);
+    coverRepairing = true;
+    try {
+      const data = await api.post<{ ok: boolean; album: AlbumDetail; coverUrl: string }>(
+        `/api/albums/by-key/${encodeURIComponent(album.albumKey)}/cover/refresh`,
+        { brokenUrl, force: true }
+      );
+      if (data.album.coverUrl && data.album.coverUrl !== brokenUrl) setAlbum(data);
+    } catch {
+      // Keep the initials fallback; cover repair can be retried on a later view.
+    } finally {
+      coverRepairing = false;
+    }
   }
 
   function openListPicker(): void {
@@ -175,7 +194,7 @@
   <main class="page-shell detail-shell">
     <IconButton icon="arrow-left" label="Back" className="text-button back-link" onclick={back} />
     <section class="album-hero">
-      <Cover title={a.title} coverUrl={a.coverUrl} />
+      <Cover title={a.title} coverUrl={a.coverUrl} onfail={repairBrokenCover} />
       <div>
         <h1>{a.title}</h1>
         <p>{a.artist || 'Unknown artist'}</p>

@@ -99,18 +99,19 @@
     }
   }
 
-  async function refreshCover(): Promise<void> {
+  async function refreshCover(brokenUrl = '', force = false): Promise<void> {
     const current = album;
     if (!payload || !current || albumBusy || !payload.permissions.canEdit) return;
     albumBusy = true;
     albumError = '';
     try {
       const data = await api.post<{ ok: boolean; album: ListAlbum; coverUrl: string }>(
-        `/api/lists/${payload.list.id}/albums/${current.id}/cover/refresh`
+        `/api/lists/${payload.list.id}/albums/${current.id}/cover/refresh`,
+        brokenUrl || force ? { brokenUrl, force } : undefined
       );
       const albums = payload.albums.map((a) => (a.id === data.album.id ? data.album : a));
       payload = { ...payload, albums };
-      appState.notice = 'Cover refreshed.';
+      if (!brokenUrl) appState.notice = 'Cover refreshed.';
     } catch (err) {
       albumError = getErrorMessage(err);
     } finally {
@@ -143,7 +144,7 @@
   <main class="page-shell detail-shell">
     <IconButton icon="arrow-left" label="Back" className="text-button back-link" onclick={back} />
     <section class="album-hero">
-      <Cover title={a.title} coverUrl={a.coverUrl} />
+      <Cover title={a.title} coverUrl={a.coverUrl} onfail={(url) => refreshCover(url, true)} />
       <div>
         <h1>{a.title}</h1>
         <p>{a.artist || 'Unknown artist'}</p>
@@ -167,7 +168,7 @@
               label="Refresh cover"
               className="pill"
               disabled={albumBusy}
-              onclick={refreshCover}
+              onclick={() => refreshCover()}
             />
           {/if}
           {#if libraryLabel}
