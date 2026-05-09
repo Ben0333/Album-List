@@ -1,7 +1,11 @@
 import dotenv from 'dotenv';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 
 dotenv.config();
+dotenv.config({ path: path.join(repoRoot, '.env'), override: false });
 
 function parseBoolean(value, defaultValue = false) {
   if (value === undefined || value === null || value === '') return defaultValue;
@@ -34,7 +38,7 @@ function isLocalOrigin(origin) {
 const nodeEnv = process.env.NODE_ENV || 'development';
 const appOrigin = parseAppOrigin(process.env.APP_ORIGIN || 'http://localhost:3000');
 const cookieSecure = parseBoolean(process.env.COOKIE_SECURE, nodeEnv === 'production');
-const databasePath = path.resolve(process.cwd(), process.env.DATABASE_PATH || './data/albums.sqlite');
+const databasePath = path.resolve(repoRoot, process.env.DATABASE_PATH || './data/albums.sqlite');
 
 export const config = {
   nodeEnv,

@@ -126,14 +126,21 @@ db.exec(`
 
   CREATE TABLE IF NOT EXISTS bug_reports (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
+    title TEXT NOT NULL,
+    description TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'in_progress', 'fixed', 'wont_fix')),
+    priority TEXT NOT NULL DEFAULT 'medium' CHECK (priority IN ('low', 'medium', 'high', 'critical')),
+    notes TEXT NOT NULL DEFAULT '',
+    source TEXT NOT NULL DEFAULT 'public_report',
     user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
-    body TEXT NOT NULL,
-    path TEXT NOT NULL DEFAULT '',
+    reporter_username TEXT NOT NULL DEFAULT '',
+    page_path TEXT NOT NULL DEFAULT '',
+    browser TEXT NOT NULL DEFAULT '',
     user_agent TEXT NOT NULL DEFAULT '',
     ip_hash TEXT NOT NULL DEFAULT '',
     body_hash TEXT NOT NULL DEFAULT '',
-    status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'reviewing', 'closed', 'spam')),
-    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
   );
 
   CREATE TABLE IF NOT EXISTS track_ratings (
@@ -178,6 +185,39 @@ db.exec(`
     PRIMARY KEY (slug, album_index)
   );
 
+  CREATE TABLE IF NOT EXISTS explore_playlists (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    slug TEXT NOT NULL UNIQUE,
+    name TEXT NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
+    share_link TEXT NOT NULL DEFAULT '',
+    source_list_id INTEGER REFERENCES lists(id) ON DELETE SET NULL,
+    source_list_name TEXT NOT NULL DEFAULT '',
+    source_owner_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    source_owner_username TEXT NOT NULL DEFAULT '',
+    visible INTEGER NOT NULL DEFAULT 1 CHECK (visible IN (0, 1)),
+    sort_order INTEGER NOT NULL DEFAULT 0,
+    album_count INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    imported_at TEXT
+  );
+
+  CREATE TABLE IF NOT EXISTS explore_playlist_albums (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    playlist_id INTEGER NOT NULL REFERENCES explore_playlists(id) ON DELETE CASCADE,
+    sort_order INTEGER NOT NULL DEFAULT 0,
+    title TEXT NOT NULL,
+    artist TEXT NOT NULL DEFAULT '',
+    album_key TEXT NOT NULL,
+    cover_url TEXT NOT NULL DEFAULT '',
+    release_year INTEGER,
+    source_list_album_id INTEGER REFERENCES list_albums(id) ON DELETE SET NULL,
+    source_added_by_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    source_added_by_username TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+  );
+
   CREATE TABLE IF NOT EXISTS album_cover_cache (
     album_key TEXT PRIMARY KEY,
     title TEXT NOT NULL,
@@ -206,9 +246,40 @@ db.exec(`
     PRIMARY KEY (album_key, track_key)
   );
 
+  CREATE TABLE IF NOT EXISTS app_settings (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+  );
+
+  CREATE TABLE IF NOT EXISTS active_visitors (
+    visitor_id TEXT PRIMARY KEY,
+    user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    path TEXT NOT NULL DEFAULT '',
+    user_agent TEXT NOT NULL DEFAULT '',
+    ip_hash TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    last_seen_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+  );
+
   CREATE TABLE IF NOT EXISTS admin_action_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    action TEXT NOT NULL CHECK (action IN ('disable', 'enable', 'anonymize', 'report_status', 'database_backup')),
+    action TEXT NOT NULL CHECK (action IN (
+      'disable',
+      'enable',
+      'anonymize',
+      'report_status',
+      'database_backup',
+      'bug_create',
+      'bug_update',
+      'bug_delete',
+      'maintenance_update',
+      'explore_playlist_create',
+      'explore_playlist_update',
+      'explore_playlist_delete',
+      'explore_playlist_import'
+    )),
     user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
     previous_username TEXT NOT NULL DEFAULT '',
     new_username TEXT NOT NULL DEFAULT '',
@@ -227,9 +298,6 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_completions_album ON album_completions(list_album_id);
   CREATE INDEX IF NOT EXISTS idx_removal_votes_album ON list_album_removal_votes(list_album_id);
   CREATE INDEX IF NOT EXISTS idx_list_messages_list ON list_messages(list_id, created_at);
-  CREATE INDEX IF NOT EXISTS idx_bug_reports_created ON bug_reports(created_at);
-  CREATE INDEX IF NOT EXISTS idx_bug_reports_status ON bug_reports(status, created_at);
-  CREATE INDEX IF NOT EXISTS idx_bug_reports_duplicate ON bug_reports(body_hash, user_id, ip_hash, created_at);
   CREATE INDEX IF NOT EXISTS idx_track_ratings_album ON track_ratings(album_key);
   CREATE INDEX IF NOT EXISTS idx_track_ratings_album_track ON track_ratings(album_key, track_key);
   CREATE INDEX IF NOT EXISTS idx_track_ratings_user_album ON track_ratings(user_id, album_key);
@@ -242,6 +310,11 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_album_cover_cache_updated ON album_cover_cache(updated_at);
   CREATE INDEX IF NOT EXISTS idx_album_metadata_cache_updated ON album_metadata_cache(updated_at);
   CREATE INDEX IF NOT EXISTS idx_album_track_cache_album ON album_track_cache(album_key, disc_number, position);
+  CREATE INDEX IF NOT EXISTS idx_explore_playlists_visible_order ON explore_playlists(visible, sort_order, name);
+  CREATE INDEX IF NOT EXISTS idx_explore_playlist_albums_playlist_order ON explore_playlist_albums(playlist_id, sort_order, id);
+  CREATE INDEX IF NOT EXISTS idx_explore_playlist_albums_key ON explore_playlist_albums(album_key);
+  CREATE INDEX IF NOT EXISTS idx_active_visitors_last_seen ON active_visitors(last_seen_at);
+  CREATE INDEX IF NOT EXISTS idx_active_visitors_user ON active_visitors(user_id, last_seen_at);
   CREATE UNIQUE INDEX IF NOT EXISTS idx_list_invites_one_pending
     ON list_invites(list_id, invitee_user_id)
     WHERE status = 'pending';
@@ -300,29 +373,188 @@ if (inviteTable?.sql?.includes('UNIQUE (list_id, invitee_user_id, status)')) {
   `);
 }
 
-const adminActionLogTable = db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'admin_action_log'").get();
-if (adminActionLogTable?.sql?.includes("action IN ('disable', 'enable', 'anonymize')")) {
+function tableSql(table) {
+  return db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?").get(table)?.sql || '';
+}
+
+function tableColumnNames(table) {
+  return new Set(db.prepare(`PRAGMA table_info(${table})`).all().map((row) => row.name));
+}
+
+function firstText(row, names, fallback = '') {
+  for (const name of names) {
+    const value = row?.[name];
+    if (value !== undefined && value !== null && String(value).trim()) return String(value).trim();
+  }
+  return fallback;
+}
+
+function cleanMigratedBugStatus(value) {
+  const status = String(value || '').trim().toLowerCase();
+  if (status === 'reviewing') return 'in_progress';
+  if (status === 'closed') return 'fixed';
+  if (status === 'spam') return 'wont_fix';
+  if (['open', 'in_progress', 'fixed', 'wont_fix'].includes(status)) return status;
+  return 'open';
+}
+
+function cleanMigratedBugPriority(value) {
+  const priority = String(value || '').trim().toLowerCase();
+  return ['low', 'medium', 'high', 'critical'].includes(priority) ? priority : 'medium';
+}
+
+function migratedBugTitle(row) {
+  const explicit = firstText(row, ['title']);
+  if (explicit) return explicit.slice(0, 160);
+  const description = firstText(row, ['description', 'details', 'body']);
+  const firstLine = description.split(/\r?\n/).find((line) => line.trim());
+  if (firstLine) return firstLine.trim().slice(0, 120);
+  return `Bug report ${row.id || ''}`.trim();
+}
+
+function createBugReportsTable(tableName) {
+  db.exec(`
+    CREATE TABLE ${tableName} (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      title TEXT NOT NULL,
+      description TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'in_progress', 'fixed', 'wont_fix')),
+      priority TEXT NOT NULL DEFAULT 'medium' CHECK (priority IN ('low', 'medium', 'high', 'critical')),
+      notes TEXT NOT NULL DEFAULT '',
+      source TEXT NOT NULL DEFAULT 'public_report',
+      user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+      reporter_username TEXT NOT NULL DEFAULT '',
+      page_path TEXT NOT NULL DEFAULT '',
+      browser TEXT NOT NULL DEFAULT '',
+      user_agent TEXT NOT NULL DEFAULT '',
+      ip_hash TEXT NOT NULL DEFAULT '',
+      body_hash TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+}
+
+function migrateBugReportsTable() {
+  const columns = tableColumnNames('bug_reports');
+  const sql = tableSql('bug_reports');
+  const desired =
+    columns.has('title') &&
+    columns.has('description') &&
+    columns.has('priority') &&
+    columns.has('notes') &&
+    columns.has('page_path') &&
+    columns.has('updated_at') &&
+    sql.includes('in_progress') &&
+    sql.includes('wont_fix');
+  if (desired) return;
+
+  const rows = db.prepare('SELECT * FROM bug_reports ORDER BY id').all();
+  const now = new Date().toISOString();
+
   db.exec(`
     PRAGMA foreign_keys = OFF;
-    ALTER TABLE admin_action_log RENAME TO admin_action_log_old;
-    CREATE TABLE admin_action_log (
+    DROP TABLE IF EXISTS bug_reports_new;
+  `);
+  createBugReportsTable('bug_reports_new');
+
+  const insert = db.prepare(
+    `INSERT INTO bug_reports_new
+     (id, title, description, status, priority, notes, source, user_id, reporter_username, page_path, browser, user_agent, ip_hash, body_hash, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  );
+
+  for (const row of rows) {
+    const createdAt = firstText(row, ['created_at'], now);
+    insert.run(
+      row.id,
+      migratedBugTitle(row),
+      firstText(row, ['description', 'details', 'body'], migratedBugTitle(row)),
+      cleanMigratedBugStatus(row.status),
+      cleanMigratedBugPriority(row.priority),
+      firstText(row, ['notes']),
+      firstText(row, ['source'], 'public_report'),
+      row.user_id ?? null,
+      firstText(row, ['reporter_username', 'username']),
+      firstText(row, ['page_path', 'path']),
+      firstText(row, ['browser', 'user_agent']),
+      firstText(row, ['user_agent', 'browser']),
+      firstText(row, ['ip_hash']),
+      firstText(row, ['body_hash']),
+      createdAt,
+      firstText(row, ['updated_at'], createdAt)
+    );
+  }
+
+  db.exec(`
+    DROP TABLE bug_reports;
+    ALTER TABLE bug_reports_new RENAME TO bug_reports;
+    PRAGMA foreign_keys = ON;
+  `);
+}
+
+function createAdminActionLogTable(tableName) {
+  db.exec(`
+    CREATE TABLE ${tableName} (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
-      action TEXT NOT NULL CHECK (action IN ('disable', 'enable', 'anonymize', 'report_status', 'database_backup')),
+      action TEXT NOT NULL CHECK (action IN (
+        'disable',
+        'enable',
+        'anonymize',
+        'report_status',
+        'database_backup',
+        'bug_create',
+        'bug_update',
+        'bug_delete',
+        'maintenance_update',
+        'explore_playlist_create',
+        'explore_playlist_update',
+        'explore_playlist_delete',
+        'explore_playlist_import'
+      )),
       user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
       previous_username TEXT NOT NULL DEFAULT '',
       new_username TEXT NOT NULL DEFAULT '',
       details TEXT NOT NULL DEFAULT '',
       created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-    );
-    INSERT INTO admin_action_log (id, action, user_id, previous_username, new_username, details, created_at)
-      SELECT id, action, user_id, previous_username, new_username, details, created_at
-      FROM admin_action_log_old;
-    DROP TABLE admin_action_log_old;
-    PRAGMA foreign_keys = ON;
-    CREATE INDEX IF NOT EXISTS idx_admin_action_log_created ON admin_action_log(created_at);
-    CREATE INDEX IF NOT EXISTS idx_admin_action_log_user ON admin_action_log(user_id, created_at);
+    )
   `);
 }
+
+function migrateAdminActionLogTable() {
+  if (tableSql('admin_action_log').includes('maintenance_update')) return;
+  db.exec(`
+    PRAGMA foreign_keys = OFF;
+    DROP TABLE IF EXISTS admin_action_log_new;
+  `);
+  createAdminActionLogTable('admin_action_log_new');
+  db.exec(`
+    INSERT INTO admin_action_log_new (id, action, user_id, previous_username, new_username, details, created_at)
+      SELECT id, action, user_id, previous_username, new_username, details, created_at
+      FROM admin_action_log;
+    DROP TABLE admin_action_log;
+    ALTER TABLE admin_action_log_new RENAME TO admin_action_log;
+    PRAGMA foreign_keys = ON;
+  `);
+}
+
+migrateBugReportsTable();
+migrateAdminActionLogTable();
+
+db.exec(`
+  CREATE INDEX IF NOT EXISTS idx_bug_reports_created ON bug_reports(created_at);
+  CREATE INDEX IF NOT EXISTS idx_bug_reports_status ON bug_reports(status, created_at);
+  CREATE INDEX IF NOT EXISTS idx_bug_reports_priority ON bug_reports(priority, created_at);
+  CREATE INDEX IF NOT EXISTS idx_bug_reports_updated ON bug_reports(updated_at);
+  CREATE INDEX IF NOT EXISTS idx_bug_reports_duplicate ON bug_reports(body_hash, user_id, ip_hash, created_at);
+  CREATE INDEX IF NOT EXISTS idx_admin_action_log_created ON admin_action_log(created_at);
+  CREATE INDEX IF NOT EXISTS idx_admin_action_log_user ON admin_action_log(user_id, created_at);
+`);
+
+db.prepare(
+  `INSERT OR IGNORE INTO app_settings (key, value, description, updated_at)
+   VALUES (?, ?, ?, ?)`
+).run('maintenance_mode', '0', 'When set to 1, the public website returns a maintenance page and public API writes are unavailable.', new Date().toISOString());
 
 export function nowIso() {
   return new Date().toISOString();

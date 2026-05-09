@@ -28,11 +28,56 @@
 
   let booted = $state<boolean>(false);
   let bootError = $state<string>('');
+  const visitorStorageKey = 'albumsActiveVisitorId';
+
+  function activeVisitorId(): string {
+    const saved = localStorage.getItem(visitorStorageKey);
+    if (saved && /^[a-zA-Z0-9_-]{16,80}$/.test(saved)) return saved;
+    const next =
+      typeof crypto.randomUUID === 'function'
+        ? crypto.randomUUID()
+        : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}-${Math.random().toString(36).slice(2)}`;
+    localStorage.setItem(visitorStorageKey, next);
+    return next;
+  }
+
+  function startHeartbeat(): () => void {
+    let stopped = false;
+    const send = (): void => {
+      if (stopped) return;
+      fetch('/api/activity/heartbeat', {
+        method: 'POST',
+        credentials: 'same-origin',
+        keepalive: true,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          visitorId: activeVisitorId(),
+          path: `${location.pathname}${location.search}`
+        })
+      })
+        .then((response) => (response.ok ? response.json() : null))
+        .then((payload: { visitorId?: string } | null) => {
+          if (payload?.visitorId) localStorage.setItem(visitorStorageKey, payload.visitorId);
+        })
+        .catch(() => {});
+    };
+    send();
+    const interval = window.setInterval(send, 30_000);
+    document.addEventListener('visibilitychange', send);
+    window.addEventListener('focus', send);
+    return () => {
+      stopped = true;
+      window.clearInterval(interval);
+      document.removeEventListener('visibilitychange', send);
+      window.removeEventListener('focus', send);
+    };
+  }
 
   onMount(() => {
     applyTheme(appState.themePreference);
     const stopTheme = watchSystemTheme(() => applyTheme(appState.themePreference));
     const stopScrollRestoration = setupScrollRestoration();
+    const stopHeartbeat = startHeartbeat();
     refreshMe()
       .catch((err: Error) => {
         bootError = err.message;
@@ -43,6 +88,7 @@
     return () => {
       stopTheme();
       stopScrollRestoration();
+      stopHeartbeat();
     };
   });
 
