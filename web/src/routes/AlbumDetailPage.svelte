@@ -168,13 +168,10 @@
   <Placeholder title="Could not load album" note={loadError} />
 {:else if album}
   {@const a = album}
-  {@const yourRating = a.currentUserAggregate?.count ? `Your rating ${a.currentUserAggregate.average}/10` : ''}
-  {@const turntableAverage = a.aggregate?.average !== null && a.aggregate?.average !== undefined ? `Turntable average ${a.aggregate.average}/10` : ''}
-  {@const libraryLabel = a.currentUserLibrary
-    ? a.currentUserLibrary.ratingCount
-      ? `In your list - ${a.currentUserLibrary.average}/10`
-      : 'In your list'
-    : ''}
+  {@const yourRatingValue = a.currentUserAggregate?.count ? `${a.currentUserAggregate.average}/10` : ''}
+  {@const turntableRatingValue = a.aggregate?.average !== null && a.aggregate?.average !== undefined ? `${a.aggregate.average}/10` : ''}
+  {@const turntableAverage = turntableRatingValue ? `Turntable average ${turntableRatingValue}` : ''}
+  {@const inLibrary = Boolean(a.currentUserLibrary)}
   <main class="page-shell detail-shell">
     <IconButton icon="arrow-left" label="Back" className="text-button back-link" onclick={back} />
     <section class="album-hero">
@@ -182,26 +179,43 @@
       <div>
         <h1>{a.title}</h1>
         <p>{a.artist || 'Unknown artist'}</p>
-        <div class="button-row left">
-          {#if yourRating}<span class="pill done">{yourRating}</span>{/if}
-          {#if turntableAverage}<span class="pill">{turntableAverage}</span>{/if}
-          {#if a.externalUrl}
-            <a class="pill link-pill" href={a.externalUrl} target="_blank" rel="noreferrer">Open</a>
+        <div class="album-meta">
+          {#if yourRatingValue || turntableRatingValue || inLibrary}
+            <div class="album-rating-summary">
+              {#if yourRatingValue}
+                <span class="album-rating-chip is-mine">
+                  <span>Your rating</span>
+                  <strong>{yourRatingValue}</strong>
+                </span>
+              {/if}
+              {#if turntableRatingValue}
+                <span class="album-rating-chip">
+                  <span>Turntable</span>
+                  <strong>{turntableRatingValue}</strong>
+                </span>
+              {/if}
+              {#if inLibrary}
+                <span class="album-library-chip">In your list</span>
+              {/if}
+            </div>
           {/if}
-          {#if canRate}
-            <IconButton
-              icon="headphones"
-              label={a.currentUserCompleted ? 'Listened' : 'Listen'}
-              className={`pill ${a.currentUserCompleted ? 'done' : ''}`}
-              disabled={busy}
-              onclick={toggleListened}
-            />
-          {/if}
-          {#if libraryLabel}
-            <span class="pill done">{libraryLabel}</span>
-          {:else if appState.user}
-            <IconButton icon="plus" label="Add to library" className="pill" onclick={openListPicker} />
-          {/if}
+          <div class="button-row left album-action-row">
+            {#if a.externalUrl}
+              <a class="pill link-pill" href={a.externalUrl} target="_blank" rel="noreferrer">Open</a>
+            {/if}
+            {#if canRate}
+              <IconButton
+                icon="headphones"
+                label={a.currentUserCompleted ? 'Listened' : 'Listen'}
+                className={`pill ${a.currentUserCompleted ? 'done' : ''}`}
+                disabled={busy}
+                onclick={toggleListened}
+              />
+            {/if}
+            {#if !inLibrary && appState.user}
+              <IconButton icon="plus" label="Add to library" className="pill" onclick={openListPicker} />
+            {/if}
+          </div>
         </div>
       </div>
     </section>
@@ -264,5 +278,68 @@
 <style>
   .error-line {
     color: var(--danger);
+  }
+
+  .album-meta {
+    display: grid;
+    gap: 10px;
+  }
+
+  .album-rating-summary {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .album-rating-chip,
+  .album-library-chip {
+    min-height: 34px;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: color-mix(in srgb, var(--panel) 84%, transparent);
+  }
+
+  .album-rating-chip {
+    min-width: 112px;
+    display: grid;
+    gap: 1px;
+    padding: 6px 10px;
+  }
+
+  .album-rating-chip span {
+    color: var(--muted);
+    font-size: 0.68rem;
+    font-weight: 750;
+    line-height: 1;
+    text-transform: uppercase;
+  }
+
+  .album-rating-chip strong {
+    color: var(--text);
+    font-size: 1rem;
+    line-height: 1;
+  }
+
+  .album-rating-chip.is-mine {
+    border-color: color-mix(in srgb, var(--blue) 62%, var(--line));
+    background: color-mix(in srgb, var(--blue) 10%, var(--panel));
+  }
+
+  .album-rating-chip.is-mine strong,
+  .album-library-chip {
+    color: var(--blue-strong);
+  }
+
+  .album-library-chip {
+    display: inline-grid;
+    place-items: center;
+    padding: 0 10px;
+    font-size: 0.78rem;
+    font-weight: 750;
+  }
+
+  .album-action-row {
+    gap: 8px;
   }
 </style>
