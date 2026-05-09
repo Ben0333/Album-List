@@ -5,6 +5,7 @@
   import { applyTheme, watchSystemTheme } from '$lib/theme';
   import { refreshMe } from '$lib/me';
   import { navigate } from '$lib/router.svelte';
+  import { setupScrollRestoration } from '$lib/scroll';
   import UtilityBar from './components/UtilityBar.svelte';
   import Icon from './components/Icon.svelte';
   import ToastNotice from './components/ToastNotice.svelte';
@@ -14,6 +15,7 @@
   import AvatarCropModal from './components/AvatarCropModal.svelte';
   import Login from './routes/Login.svelte';
   import Home from './routes/Home.svelte';
+  import AlbumDetailPage from './routes/AlbumDetailPage.svelte';
   import ListPage from './routes/ListPage.svelte';
   import AlbumPage from './routes/AlbumPage.svelte';
   import ExplorePage from './routes/ExplorePage.svelte';
@@ -29,7 +31,8 @@
 
   onMount(() => {
     applyTheme(appState.themePreference);
-    const stop = watchSystemTheme(() => applyTheme(appState.themePreference));
+    const stopTheme = watchSystemTheme(() => applyTheme(appState.themePreference));
+    const stopScrollRestoration = setupScrollRestoration();
     refreshMe()
       .catch((err: Error) => {
         bootError = err.message;
@@ -37,7 +40,10 @@
       .finally(() => {
         booted = true;
       });
-    return stop;
+    return () => {
+      stopTheme();
+      stopScrollRestoration();
+    };
   });
 
   // Intercept internal link clicks so SPA navigation works without full reloads.
@@ -74,6 +80,8 @@
     <Login />
   {:else if router.current.type === 'home'}
     <Home />
+  {:else if router.current.type === 'album'}
+    <AlbumDetailPage />
   {:else if router.current.type === 'list'}
     {#if router.current.albumId !== null}
       <AlbumPage />

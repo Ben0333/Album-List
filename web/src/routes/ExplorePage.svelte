@@ -13,6 +13,7 @@
   } from '$lib/types';
   import IconButton from '../components/IconButton.svelte';
   import Cover from '../components/Cover.svelte';
+  import RatingRow from '../components/RatingRow.svelte';
   import Placeholder from './Placeholder.svelte';
 
   let indexData = $state<ExploreIndexPayload | null>(null);
@@ -20,6 +21,8 @@
   let loading = $state<boolean>(true);
   let loadError = $state<string>('');
   let shuffleBusy = $state<boolean>(false);
+  let albumBusy = $state<boolean>(false);
+  let albumError = $state<string>('');
 
   $effect(() => {
     const route = router.current;
@@ -28,6 +31,7 @@
     let cancelled = false;
     loading = true;
     loadError = '';
+    albumError = '';
     indexData = null;
     detailData = null;
     const promise = slug
@@ -53,6 +57,11 @@
   const slug = $derived(router.current.type === 'explore' ? router.current.slug : null);
   const albumIndex = $derived(router.current.type === 'explore' ? router.current.albumIndex : null);
   const currentAlbum = $derived<ExploreAlbum | null>(detailData && albumIndex !== null ? detailData.albums[albumIndex] ?? null : null);
+
+  $effect(() => {
+    if (router.current.type !== 'explore' || router.current.albumIndex === null || !currentAlbum?.albumKey) return;
+    navigate(`/album/${encodeURIComponent(currentAlbum.albumKey)}`, { replace: true });
+  });
 
   function albumSubtitle(album: ExploreAlbum): string {
     const artist = album.artist || 'Unknown artist';
@@ -96,19 +105,50 @@
     navigate(`/list/${list.id}`);
   }
 
+  function openAlbum(album: ExploreAlbum, index: number): void {
+    if (album.albumKey) {
+      navigate(`/album/${encodeURIComponent(album.albumKey)}`);
+      return;
+    }
+    if (detailData) navigate(`/explore/${encodeURIComponent(detailData.slug)}/album/${index}`);
+  }
+
   async function shuffleExplore(currentSlug?: string): Promise<void> {
     if (shuffleBusy) return;
     shuffleBusy = true;
     try {
       if (currentSlug && detailData?.slug === currentSlug && detailData.albums.length) {
         const nextIndex = Math.floor(Math.random() * detailData.albums.length);
-        navigate(`/explore/${encodeURIComponent(currentSlug)}/album/${nextIndex}`);
+        const nextAlbum = detailData.albums[nextIndex];
+        if (nextAlbum?.albumKey) navigate(`/album/${encodeURIComponent(nextAlbum.albumKey)}`);
+        else navigate(`/explore/${encodeURIComponent(currentSlug)}/album/${nextIndex}`);
         return;
       }
     } catch (err) {
       appState.error = getErrorMessage(err);
     } finally {
       shuffleBusy = false;
+    }
+  }
+
+  async function rateExploreAlbum(rating: number): Promise<void> {
+    const list = detailData;
+    const index = albumIndex;
+    const album = currentAlbum;
+    if (!list || index === null || !album || !appState.user || albumBusy) return;
+    albumBusy = true;
+    albumError = '';
+    try {
+      const data = await api.put<{ ok: boolean; album: ExploreAlbum }>(
+        `/api/explore/${encodeURIComponent(list.slug)}/albums/${index}/rating`,
+        { rating, coverUrl: album.coverUrl }
+      );
+      const albums = list.albums.map((item, itemIndex) => (itemIndex === index ? data.album : item));
+      detailData = { ...list, albums };
+    } catch (err) {
+      albumError = getErrorMessage(err);
+    } finally {
+      albumBusy = false;
     }
   }
 </script>
@@ -143,7 +183,20 @@
         </div>
       </div>
     </section>
-    <div class="empty-minimal small">Add this album to a list to rate tracks.</div>
+    {#if appState.user}
+      <div class="album-rating-panel">
+        <div class="track-row album-rating-row">
+          <div>
+            <strong>Your rating</strong>
+            <span>{albumStatus(album) || 'No rating yet'}</span>
+            {#if albumError}<span class="error-line">{albumError}</span>{/if}
+          </div>
+          <RatingRow current={album.currentUserAlbumRating?.rating ?? null} disabled={albumBusy} onpick={rateExploreAlbum} />
+        </div>
+      </div>
+    {:else}
+      <div class="empty-minimal small">Log in to rate this album.</div>
+    {/if}
   </main>
 {:else if detailData}
   <main class="page-shell explore-shell">
@@ -170,7 +223,7 @@
             <Cover title={album.title} coverUrl={album.coverUrl} />
             <button
               class="album-title"
-              onclick={() => navigate(`/explore/${encodeURIComponent(detailData!.slug)}/album/${index}`)}
+              onclick={() => openAlbum(album, index)}
             >
               <strong>{album.title}</strong>
               <span>{albumSubtitle(album)}</span>
@@ -220,3 +273,9 @@
     {/if}
   </main>
 {/if}
+
+<style>
+  .error-line {
+    color: var(--danger);
+  }
+</style>

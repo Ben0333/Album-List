@@ -11,11 +11,11 @@
     album: ListAlbum;
     payload: ListPayload;
     highlighted?: boolean;
-    pathPrefix: string;
+    openPath?: string | null;
     onPayloadUpdate: (next: ListPayload) => void;
   }
 
-  let { album, payload, highlighted = false, pathPrefix, onPayloadUpdate }: Props = $props();
+  let { album, payload, highlighted = false, openPath = null, onPayloadUpdate }: Props = $props();
   let busy = $state<boolean>(false);
 
   const subtitle: string = $derived.by(() => {
@@ -52,7 +52,7 @@
   });
 
   function open(): void {
-    navigate(`${pathPrefix}/album/${album.id}`);
+    navigate(openPath || `/album/${encodeURIComponent(album.albumKey)}`);
   }
 
   async function removeOrVote(): Promise<void> {

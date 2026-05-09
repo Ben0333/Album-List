@@ -156,6 +156,26 @@ export interface ListAlbum {
   }>;
 }
 
+export interface AlbumDetail {
+  albumKey: string;
+  title: string;
+  artist: string;
+  coverUrl: string | null;
+  externalUrl: string | null;
+  tracks: AlbumTrack[];
+  currentUserCompleted: boolean;
+  currentUserFullyRated: boolean;
+  currentUserAverageOptIn: boolean;
+  currentUserAlbumRating: TrackRating | null;
+  currentUserAggregate: { average: number | null; count: number } | null;
+  currentUserLibrary: AlbumLibraryRef | null;
+  aggregate: { average: number | null; count: number } | null;
+}
+
+export interface AlbumDetailPayload {
+  album: AlbumDetail;
+}
+
 export interface ListSummaryFull {
   id: number;
   ownerUserId: number;
@@ -220,6 +240,7 @@ export interface ExploreAlbum {
   coverUrl: string | null;
   spotifyAlbumId?: string | null;
   currentUserCompleted?: boolean;
+  currentUserAlbumRating?: TrackRating | null;
   currentUserRatingAverage?: number | null;
   currentUserRatingCount?: number;
 }

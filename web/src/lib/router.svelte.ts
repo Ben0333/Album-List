@@ -1,6 +1,9 @@
+import { hasSavedScrollForRoute, restoreScrollForCurrentRoute, saveCurrentScroll } from './scroll';
+
 export type Route =
   | { type: 'home' }
   | { type: 'login' }
+  | { type: 'album'; albumKey: string }
   | { type: 'list'; id: number; albumId: number | null }
   | { type: 'share'; token: string; albumId: number | null }
   | { type: 'invite'; token: string }
@@ -11,6 +14,7 @@ export type Route =
 function parseRoute(): Route {
   const parts = window.location.pathname.split('/').filter(Boolean);
   if (parts[0] === 'login') return { type: 'login' };
+  if (parts[0] === 'album' && parts[1]) return { type: 'album', albumKey: decodeURIComponent(parts[1]) };
   if (parts[0] === 'explore') {
     return {
       type: 'explore',
@@ -60,14 +64,20 @@ export const router = {
 
 window.addEventListener('popstate', () => {
   _route = parseRoute();
+  restoreScrollForCurrentRoute({ fallbackToTop: true });
 });
 
 export function navigate(to: string, options: { replace?: boolean } = {}): void {
   if (to === window.location.pathname + window.location.search) return;
+  const from = window.location.pathname + window.location.search;
+  saveCurrentScroll();
+  const hasSavedTargetScroll = hasSavedScrollForRoute(to);
   if (options.replace) {
-    window.history.replaceState(null, '', to);
+    const state = window.history.state as { from?: string } | null;
+    window.history.replaceState(state?.from ? { from: state.from } : {}, '', to);
   } else {
-    window.history.pushState(null, '', to);
+    window.history.pushState({ from }, '', to);
   }
   _route = parseRoute();
+  restoreScrollForCurrentRoute({ fallbackToTop: !hasSavedTargetScroll });
 }
