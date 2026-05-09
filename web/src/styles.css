@@ -412,6 +412,12 @@ h1 {
   color: var(--blue-strong);
 }
 
+.list-switcher a:visited,
+.list-switcher a:hover,
+.list-switcher a:active {
+  text-decoration: none;
+}
+
 .list-select {
   width: 100%;
   min-height: 38px;
@@ -701,11 +707,26 @@ h1 {
   text-align: left;
 }
 
+.album-title:visited,
+.album-title:hover,
+.album-title:active {
+  color: inherit;
+  text-decoration: none;
+}
+
 .album-title strong,
 .album-title span {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.album-title strong {
+  color: var(--text);
+}
+
+.album-title span {
+  color: var(--muted);
 }
 
 .album-title.static {
@@ -737,6 +758,13 @@ h1 {
 .avatar.pending {
   filter: grayscale(1);
   opacity: 0.36;
+}
+
+.avatar:visited,
+.avatar:hover,
+.avatar:active {
+  color: #ffffff;
+  text-decoration: none;
 }
 
 .avatar img {
@@ -1463,12 +1491,27 @@ label span {
   border: 1px solid var(--line);
   border-radius: var(--radius);
   background: var(--panel);
+  color: var(--text);
+  text-decoration: none;
   box-shadow: var(--shadow);
+}
+
+.explore-card:visited,
+.explore-card:hover,
+.explore-card:active {
+  color: var(--text);
+  text-decoration: none;
+}
+
+.explore-card strong {
+  color: var(--text);
+  text-decoration: none;
 }
 
 .explore-card span,
 .explore-card small {
   color: var(--muted);
+  text-decoration: none;
 }
 
 .rank-number {
