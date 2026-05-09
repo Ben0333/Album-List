@@ -82,7 +82,7 @@
   </label>
   {#if saveError}<div class="error-line">{saveError}</div>{/if}
   <div class="button-row">
-    <IconButton icon="check" label={busy ? 'Saving…' : 'Save'} className="primary" type="submit" disabled={busy} />
+    <IconButton icon="check" label={busy ? 'Saving...' : 'Save'} className="primary" type="submit" disabled={busy} />
   </div>
 </form>
 

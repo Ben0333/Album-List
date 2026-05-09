@@ -65,7 +65,7 @@
 </script>
 
 {#if loading && !history}
-  <Placeholder title="Loading…" />
+  <Placeholder title="Loading..." />
 {:else if loadError}
   <Placeholder title="Could not load history" note={loadError} />
 {:else if focused && history}

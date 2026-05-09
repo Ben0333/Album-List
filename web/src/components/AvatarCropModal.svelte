@@ -102,7 +102,7 @@
       </div>
       {#if cropError}<div class="error-line">{cropError}</div>{/if}
       <div class="button-row left">
-        <IconButton icon="check" label={saving ? 'Saving…' : 'Save photo'} className="primary" disabled={saving} onclick={save} />
+        <IconButton icon="check" label={saving ? 'Saving...' : 'Save photo'} className="primary" disabled={saving} onclick={save} />
         <IconButton icon="x" label="Cancel" onclick={onClose} />
       </div>
     </section>

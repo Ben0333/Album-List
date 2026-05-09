@@ -12,7 +12,7 @@
 </script>
 
 {#if appState.user}
-  <Placeholder title="Loading…" note="Redirecting to your list." />
+  <Placeholder title="Loading..." note="Redirecting to your list." />
 {:else}
   <GuestPage />
 {/if}

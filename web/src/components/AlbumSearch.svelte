@@ -134,7 +134,7 @@
     {#if open}
       <div class="suggestions" data-search-popup>
         {#if searching}
-          <div class="suggestion-empty">Searching…</div>
+          <div class="suggestion-empty">Searching...</div>
         {:else if !query || query.length < 2}
           {#if lastError}<div class="suggestion-empty">{lastError}</div>{/if}
         {:else if !suggestions.length}

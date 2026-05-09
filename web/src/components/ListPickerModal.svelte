@@ -111,7 +111,7 @@
       {#if modalError}<div class="error-line">{modalError}</div>{/if}
       <div class="picker-list">
         {#if loading}
-          <div class="empty-minimal small">Loading…</div>
+          <div class="empty-minimal small">Loading...</div>
         {:else if !lists.length}
           <div class="empty-minimal small">No editable lists yet.</div>
         {:else}

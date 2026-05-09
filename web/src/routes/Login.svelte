@@ -133,7 +133,7 @@
       {/if}
       <button class="primary icon-text-button" type="submit" disabled={submitting}>
         <Icon name={isRegister ? 'user-plus' : 'log-in'} />
-        <span class="button-label">{submitting ? 'Working…' : isRegister ? 'Create account' : 'Sign in'}</span>
+        <span class="button-label">{submitting ? 'Working...' : isRegister ? 'Create account' : 'Sign in'}</span>
       </button>
     </form>
   </section>

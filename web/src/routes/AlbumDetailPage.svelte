@@ -26,9 +26,21 @@
     pageError = '';
     album = null;
     api
-      .get<AlbumDetailPayload>(`/api/albums/by-key/${encodeURIComponent(albumKey)}`)
+      .get<AlbumDetailPayload>(`/api/albums/by-key/${encodeURIComponent(albumKey)}?fast=1`)
       .then((data) => {
-        if (!cancelled) album = data.album;
+        if (cancelled) return;
+        album = data.album;
+        if (data.album.hydrationPending) {
+          void api
+            .get<AlbumDetailPayload>(`/api/albums/by-key/${encodeURIComponent(albumKey)}`)
+            .then((next) => {
+              const currentRoute = router.current;
+              if (!cancelled && currentRoute.type === 'album' && currentRoute.albumKey === albumKey) album = next.album;
+            })
+            .catch(() => {
+              // Keep the fast preview visible if the slower metadata hydration fails.
+            });
+        }
       })
       .catch((err: unknown) => {
         if (cancelled) return;
@@ -182,7 +194,7 @@
 </script>
 
 {#if loading && !album}
-  <Placeholder title="Loadingâ€¦" />
+  <Placeholder title="Loading..." />
 {:else if loadError}
   <Placeholder title="Could not load album" note={loadError} />
 {:else if album}
@@ -276,6 +288,8 @@
             </div>
           {/each}
         </div>
+      {:else if a.hydrationPending}
+        <div class="empty-minimal small">Loading track list...</div>
       {:else if canRate}
         <div class="album-rating-panel">
           <div class="track-row album-rating-row">

@@ -163,6 +163,7 @@ export interface AlbumDetail {
   coverUrl: string | null;
   externalUrl: string | null;
   tracks: AlbumTrack[];
+  hydrationPending?: boolean;
   currentUserCompleted: boolean;
   currentUserFullyRated: boolean;
   currentUserAverageOptIn: boolean;

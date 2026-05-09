@@ -102,7 +102,7 @@
   {#if open}
     <div class="user-results" data-search-popup>
       {#if searching}
-        <div class="user-line muted">Searching…</div>
+        <div class="user-line muted">Searching...</div>
       {:else if !query || query.length < 2}
         {#if pickError}<div class="user-line muted">{pickError}</div>{/if}
       {:else if !results.length}

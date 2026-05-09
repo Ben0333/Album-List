@@ -211,7 +211,7 @@
 </script>
 
 {#if loading && !indexData && !detailData}
-  <Placeholder title="Loading…" />
+  <Placeholder title="Loading..." />
 {:else if loadError}
   <Placeholder title="Could not load explore" note={loadError} />
 {:else if currentAlbum && detailData}

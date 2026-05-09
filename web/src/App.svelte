@@ -73,7 +73,7 @@
     <ToastNotice message={appState.error} onDismiss={() => (appState.error = '')} />
   {/if}
   {#if !booted}
-    <Placeholder title="Loading…" />
+    <Placeholder title="Loading..." />
   {:else if bootError}
     <Placeholder title="Connection error" note={bootError} />
   {:else if router.current.type === 'login'}

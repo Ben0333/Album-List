@@ -3380,10 +3380,13 @@ async function hydratedAlbumInputForKey(albumKeyValue, req, options = {}) {
   const source = exploreAlbumSourceByKey(albumKeyValue);
   const rejectedCoverUrls = new Set(safeCoverUrlList(options.brokenCoverUrls || []));
   const forceCoverRefresh = Boolean(options.forceCoverRefresh);
+  const fast = Boolean(options.fast);
   let coverUrl = '';
   const storedCoverUrl = safeExternalImageUrl(metadata.cover_url) || cachedAlbumCover(title, artist);
   if (storedCoverUrl) {
-    if (!forceCoverRefresh && !rejectedCoverUrls.has(storedCoverUrl) && (await imageUrlWorks(storedCoverUrl))) {
+    if (fast && !forceCoverRefresh && !rejectedCoverUrls.has(storedCoverUrl)) {
+      coverUrl = storedCoverUrl;
+    } else if (!forceCoverRefresh && !rejectedCoverUrls.has(storedCoverUrl) && (await imageUrlWorks(storedCoverUrl))) {
       coverUrl = storedCoverUrl;
     } else {
       rejectedCoverUrls.add(storedCoverUrl);
@@ -3399,7 +3402,7 @@ async function hydratedAlbumInputForKey(albumKeyValue, req, options = {}) {
     if (coverUrl && rejectedCoverUrls.has(coverUrl)) coverUrl = '';
   }
 
-  if (!tracks.length) {
+  if (!fast && !tracks.length) {
     usedAlbumLookupRateLimit = true;
     const hydrated = await hydrateAlbumInputTracks({ title, artist, coverUrl }, req);
     tracks = sanitizeTracks(hydrated?.tracks);
@@ -3410,7 +3413,7 @@ async function hydratedAlbumInputForKey(albumKeyValue, req, options = {}) {
     }
   }
 
-  if (!coverUrl) {
+  if (!fast && !coverUrl) {
     if (!usedAlbumLookupRateLimit) limitAlbumLookup(req);
     coverUrl = await resolveVerifiedAlbumCover(title, artist, itunesCountry(req), [...rejectedCoverUrls]).catch(() => '');
   }
@@ -3434,7 +3437,8 @@ async function hydratedAlbumInputForKey(albumKeyValue, req, options = {}) {
     title,
     artist,
     cover_url: coverUrl,
-    tracks
+    tracks,
+    hydration_pending: Boolean(fast && (!tracks.length || !coverUrl))
   };
 }
 
@@ -3503,6 +3507,7 @@ function buildCanonicalAlbumPayload(album, user) {
     coverUrl: safeExternalImageUrl(album.cover_url),
     externalUrl: albumExternalUrl(album, user?.musicPlatform || 'na'),
     tracks: album.tracks.map((track, index) => trackPayloadForAlbum(albumKeyValue, track, index, user)),
+    hydrationPending: Boolean(album.hydration_pending),
     currentUserCompleted: Boolean(user && userAlbumFullyListened(user.id, albumKeyValue)),
     currentUserFullyRated: Boolean(user && userAlbumFullyRated(user.id, albumKeyValue)),
     currentUserAverageOptIn: optInRow ? Boolean(optInRow.include_in_average) : true,
@@ -3730,7 +3735,9 @@ app.get('/api/explore', (req, res) => {
 app.get(
   '/api/albums/by-key/:albumKey',
   route(async (req, res) => {
-    const album = await hydratedAlbumInputForKey(req.params.albumKey, req);
+    const album = await hydratedAlbumInputForKey(req.params.albumKey, req, {
+      fast: req.query.fast === '1' || req.query.fast === 'true'
+    });
     res.setHeader('Cache-Control', req.user ? 'private, no-cache' : 'no-store');
     res.json({ album: buildCanonicalAlbumPayload(album, req.user) });
   })
