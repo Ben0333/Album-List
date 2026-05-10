@@ -401,6 +401,42 @@ function storageUsage() {
   };
 }
 
+function metadataQueueDiagnostics() {
+  const counts = { queued: 0, running: 0, done: 0, failed: 0 };
+  for (const row of db.prepare('SELECT status, COUNT(*) AS count FROM metadata_jobs GROUP BY status').all()) {
+    counts[row.status] = Number(row.count || 0);
+  }
+  const oldestQueued = db
+    .prepare("SELECT MIN(created_at) AS value FROM metadata_jobs WHERE status = 'queued'")
+    .get()?.value || null;
+  const newestUpdated = db.prepare('SELECT MAX(updated_at) AS value FROM metadata_jobs').get()?.value || null;
+  return { counts, oldestQueued, newestUpdated };
+}
+
+function localCoverCacheSummary() {
+  const row = db
+    .prepare(
+      `SELECT COUNT(*) AS count,
+              COALESCE(SUM(byte_size), 0) AS byte_size,
+              MIN(last_accessed_at) AS oldest_accessed_at,
+              MAX(last_accessed_at) AS newest_accessed_at
+       FROM album_image_cache
+       WHERE local_path != '' AND public_path != ''`
+    )
+    .get();
+  return {
+    count: Number(row?.count || 0),
+    byteSize: Number(row?.byte_size || 0),
+    byteLabel: formatBytes(Number(row?.byte_size || 0)),
+    maxImages: config.maxLocalCoverImages,
+    maxBytes: config.maxLocalCoverBytes,
+    maxBytesLabel: formatBytes(config.maxLocalCoverBytes),
+    oldestAccessedAt: row?.oldest_accessed_at || null,
+    newestAccessedAt: row?.newest_accessed_at || null,
+    directory: config.localCoverCacheDir
+  };
+}
+
 function cleanupActiveVisitors() {
   const cutoff = new Date(Date.now() - activeVisitorRetentionMs).toISOString();
   db.prepare('DELETE FROM active_visitors WHERE last_seen_at < ?').run(cutoff);
@@ -1031,11 +1067,23 @@ app.get(
       },
       activeVisitors: visitors,
       storage: storageUsage(),
+      metadataQueue: metadataQueueDiagnostics(),
+      localCoverCache: localCoverCacheSummary(),
       maintenance: {
         enabled: maintenanceMode()
       },
       bugReportsByStatus,
       recentSignups
+    });
+  })
+);
+
+app.get(
+  '/admin/api/metadata',
+  route((req, res) => {
+    res.json({
+      metadataQueue: metadataQueueDiagnostics(),
+      localCoverCache: localCoverCacheSummary()
     });
   })
 );

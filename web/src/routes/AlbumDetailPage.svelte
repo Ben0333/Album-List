@@ -14,6 +14,7 @@
   let busy = $state<boolean>(false);
   let pageError = $state<string>('');
   let coverRepairing = $state<boolean>(false);
+  let metadataRefreshing = $state<boolean>(false);
   const failedCoverUrls = new Set<string>();
 
   $effect(() => {
@@ -30,17 +31,6 @@
       .then((data) => {
         if (cancelled) return;
         album = data.album;
-        if (data.album.hydrationPending) {
-          void api
-            .get<AlbumDetailPayload>(`/api/albums/by-key/${encodeURIComponent(albumKey)}`)
-            .then((next) => {
-              const currentRoute = router.current;
-              if (!cancelled && currentRoute.type === 'album' && currentRoute.albumKey === albumKey) album = next.album;
-            })
-            .catch(() => {
-              // Keep the fast preview visible if the slower metadata hydration fails.
-            });
-        }
       })
       .catch((err: unknown) => {
         if (cancelled) return;
@@ -83,6 +73,23 @@
       // Keep the initials fallback; cover repair can be retried on a later view.
     } finally {
       coverRepairing = false;
+    }
+  }
+
+  async function refreshMetadata(): Promise<void> {
+    if (!album || metadataRefreshing) return;
+    metadataRefreshing = true;
+    pageError = '';
+    try {
+      const data = await api.post<{ ok: boolean; album: AlbumDetail }>(
+        `/api/albums/by-key/${encodeURIComponent(album.albumKey)}/metadata/refresh`,
+        {}
+      );
+      setAlbum(data);
+    } catch (err) {
+      pageError = getErrorMessage(err);
+    } finally {
+      metadataRefreshing = false;
     }
   }
 
@@ -245,6 +252,9 @@
             {/if}
             {#if !inLibrary && appState.user}
               <IconButton icon="plus" label="Add to library" className="pill" onclick={openListPicker} />
+            {/if}
+            {#if a.hydrationPending}
+              <IconButton icon="refresh" label="Refresh metadata" className="pill" disabled={metadataRefreshing} onclick={refreshMetadata} />
             {/if}
           </div>
         </div>

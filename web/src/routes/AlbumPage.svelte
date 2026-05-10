@@ -200,6 +200,8 @@
             <TrackRow {track} album={a} {payload} onPayloadUpdate={(next) => (payload = next)} />
           {/each}
         </div>
+      {:else if a.hydrationPending}
+        <div class="empty-minimal small">Loading track list...</div>
       {:else if payload.permissions.canRate}
         <div class="album-rating-panel">
           <div class="track-row album-rating-row">

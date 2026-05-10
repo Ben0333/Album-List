@@ -460,11 +460,38 @@ async function loadSummary({ silent = false } = {}) {
     for (const [label, value] of stats) target.append(el('div', { className: 'stat' }, [el('b', { text: value }), el('span', { text: label })]));
     target.append(maintenanceCard(data.maintenance));
     target.append(storageCard(data.storage));
+    target.append(metadataQueueCard(data.metadataQueue));
+    target.append(localCoverCacheCard(data.localCoverCache));
     target.append(activeVisitorsCard(data.activeVisitors));
   } catch (error) {
     clear(target);
     target.append(el('div', { className: 'error', text: error.message }));
   }
+}
+
+function metadataQueueCard(metadataQueue) {
+  const counts = metadataQueue?.counts || {};
+  return el('div', { className: 'stat' }, [
+    el('b', { text: counts.queued ?? 0 }),
+    el('span', { text: `Metadata jobs: ${counts.running ?? 0} running, ${counts.failed ?? 0} failed, ${counts.done ?? 0} done` }),
+    el('small', { text: metadataQueue?.oldestQueued ? `Oldest queued ${formatDate(metadataQueue.oldestQueued)}` : 'No queued metadata jobs' })
+  ]);
+}
+
+function localCoverCacheCard(localCoverCache) {
+  const count = localCoverCache?.count ?? 0;
+  const maxImages = localCoverCache?.maxImages ?? 0;
+  const bytes = localCoverCache?.byteLabel || '0 B';
+  const maxBytes = localCoverCache?.maxBytesLabel || '';
+  return el('div', { className: 'stat' }, [
+    el('b', { text: count }),
+    el('span', { text: `Local covers: ${bytes}${maxBytes ? ` of ${maxBytes}` : ''}` }),
+    el('small', {
+      text: maxImages
+        ? `Retaining up to ${maxImages} images. Newest access ${formatDate(localCoverCache?.newestAccessedAt) || 'n/a'}`
+        : 'Local cover cache limits unavailable'
+    })
+  ]);
 }
 
 function maintenanceCard(maintenance) {

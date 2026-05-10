@@ -7,7 +7,7 @@
   "scripts": {
     "start": "node src/server.js",
     "dev": "node --watch src/server.js",
-    "check": "node --check src/server.js && node --check src/explore-data.js"
+    "check": "node --check src/server.js && node --check src/explore-data.js && node --check src/metadata-jobs.js && node --check src/metadata-worker.js && node --check src/local-cover-cache.js"
   },
   "dependencies": {
     "@albums/shared": "*",
