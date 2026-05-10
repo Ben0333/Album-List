@@ -19,6 +19,10 @@ function count(db, sql, ...params) {
   return Number(db.prepare(sql).get(...params)?.count || 0);
 }
 
+function placeholders(values) {
+  return values.map(() => '?').join(',');
+}
+
 const databasePath = path.resolve(process.cwd(), requireEnv('DATABASE_PATH'));
 const testPrefix = requireEnv('TEST_PREFIX');
 
@@ -45,8 +49,21 @@ try {
   db.exec('PRAGMA foreign_keys = ON');
 
   const matchingUsersWhere = '(username LIKE ? ESCAPE ? OR email LIKE ? ESCAPE ?)';
+  const matchingUserParams = [likePrefix, '\\', likePrefix, '\\'];
+  const matchingAlbumRows = db
+    .prepare(
+      `SELECT DISTINCT la.album_key
+       FROM list_albums la
+       JOIN lists l ON l.id = la.list_id
+       WHERE l.name LIKE ? ESCAPE ?
+          OR la.notes LIKE ? ESCAPE ?
+          OR la.created_by IN (SELECT id FROM users WHERE ${matchingUsersWhere})`
+    )
+    .all(likePrefix, '\\', likePrefix, '\\', ...matchingUserParams);
+  const albumKeys = matchingAlbumRows.map((row) => row.album_key).filter(Boolean);
+
   const before = {
-    users: count(db, `SELECT COUNT(*) AS count FROM users WHERE ${matchingUsersWhere}`, likePrefix, '\\', likePrefix, '\\'),
+    users: count(db, `SELECT COUNT(*) AS count FROM users WHERE ${matchingUsersWhere}`, ...matchingUserParams),
     lists: count(db, 'SELECT COUNT(*) AS count FROM lists WHERE name LIKE ? ESCAPE ?', likePrefix, '\\'),
     reports: count(
       db,
@@ -57,19 +74,32 @@ try {
           OR user_id IN (SELECT id FROM users WHERE ${matchingUsersWhere})`,
       likePrefix,
       '\\',
-      likePrefix,
-      '\\',
-      likePrefix,
-      '\\',
-      likePrefix,
-      '\\'
-    )
+      ...matchingUserParams
+    ),
+    metadataJobs: albumKeys.length
+      ? count(db, `SELECT COUNT(*) AS count FROM metadata_jobs WHERE album_key IN (${placeholders(albumKeys)})`, ...albumKeys)
+      : 0
   };
 
   console.log(JSON.stringify({ event: 'cleanup_preview', databasePath, testPrefix, before }, null, 2));
 
   db.exec('BEGIN IMMEDIATE');
   try {
+    const deletedMetadata = {};
+    if (albumKeys.length) {
+      for (const table of [
+        'metadata_jobs',
+        'album_cover_lookup_failures',
+        'album_hydration_status',
+        'album_metadata_cache',
+        'album_cover_cache',
+        'album_track_cache',
+        'album_image_cache'
+      ]) {
+        deletedMetadata[table] = db.prepare(`DELETE FROM ${table} WHERE album_key IN (${placeholders(albumKeys)})`).run(...albumKeys).changes;
+      }
+    }
+
     const reports = db
       .prepare(
         `DELETE FROM bug_reports
@@ -77,11 +107,11 @@ try {
             OR description LIKE ? ESCAPE ?
             OR user_id IN (SELECT id FROM users WHERE ${matchingUsersWhere})`
       )
-      .run(likePrefix, '\\', likePrefix, '\\', likePrefix, '\\', likePrefix, '\\').changes;
+      .run(likePrefix, '\\', likePrefix, '\\', ...matchingUserParams).changes;
     const lists = db.prepare('DELETE FROM lists WHERE name LIKE ? ESCAPE ?').run(likePrefix, '\\').changes;
-    const users = db.prepare(`DELETE FROM users WHERE ${matchingUsersWhere}`).run(likePrefix, '\\', likePrefix, '\\').changes;
+    const users = db.prepare(`DELETE FROM users WHERE ${matchingUsersWhere}`).run(...matchingUserParams).changes;
     db.exec('COMMIT');
-    console.log(JSON.stringify({ event: 'cleanup_complete', deleted: { reports, lists, users } }, null, 2));
+    console.log(JSON.stringify({ event: 'cleanup_complete', deleted: { reports, lists, users, metadata: deletedMetadata } }, null, 2));
   } catch (error) {
     db.exec('ROLLBACK');
     throw error;
