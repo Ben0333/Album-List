@@ -11,6 +11,7 @@ services:
       PORT: 3001
       ADMIN_HOST: 0.0.0.0
       DATABASE_PATH: /data/albums.sqlite
+      LOCAL_COVER_CACHE_DIR: /data/covers
       # ADMIN_TOKEN or ADMIN_PASSWORD_HASH should come from .env.admin
     env_file:
       - path: .env
