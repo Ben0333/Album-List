@@ -109,6 +109,16 @@ export interface AlbumTrack {
   sharedAggregate: { average: number | null; count: number } | null;
 }
 
+export interface AlbumHydrationStatus {
+  metadataStatus: 'missing' | 'queued' | 'hydrating' | 'complete' | 'failed' | 'stale';
+  coverStatus: 'missing' | 'queued' | 'hydrating' | 'complete' | 'failed' | 'stale';
+  trackStatus: 'missing' | 'queued' | 'hydrating' | 'complete' | 'failed' | 'stale';
+  metadataUpdatedAt?: string | null;
+  coverUpdatedAt?: string | null;
+  tracksUpdatedAt?: string | null;
+  lastError?: string;
+}
+
 export interface AlbumLibraryRef {
   listId: number;
   albumId: number;
@@ -130,6 +140,7 @@ export interface ListAlbum {
   createdAt: string;
   updatedAt: string;
   tracks: AlbumTrack[];
+  hydrationStatus?: AlbumHydrationStatus;
   hydrationPending?: boolean;
   completions: AlbumCompletion[];
   pendingMembers: Member[];
@@ -164,6 +175,7 @@ export interface AlbumDetail {
   coverUrl: string | null;
   externalUrl: string | null;
   tracks: AlbumTrack[];
+  hydrationStatus?: AlbumHydrationStatus;
   hydrationPending?: boolean;
   currentUserCompleted: boolean;
   currentUserFullyRated: boolean;

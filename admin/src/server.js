@@ -437,6 +437,109 @@ function localCoverCacheSummary() {
   };
 }
 
+function emptyHydrationCounts() {
+  return {
+    missing: 0,
+    queued: 0,
+    hydrating: 0,
+    complete: 0,
+    failed: 0,
+    stale: 0
+  };
+}
+
+function hydrationStatusCounts() {
+  const result = {
+    metadata: emptyHydrationCounts(),
+    cover: emptyHydrationCounts(),
+    track: emptyHydrationCounts()
+  };
+
+  for (const row of db.prepare('SELECT metadata_status AS status, COUNT(*) AS count FROM album_hydration_status GROUP BY metadata_status').all()) {
+    result.metadata[row.status] = Number(row.count || 0);
+  }
+  for (const row of db.prepare('SELECT cover_status AS status, COUNT(*) AS count FROM album_hydration_status GROUP BY cover_status').all()) {
+    result.cover[row.status] = Number(row.count || 0);
+  }
+  for (const row of db.prepare('SELECT track_status AS status, COUNT(*) AS count FROM album_hydration_status GROUP BY track_status').all()) {
+    result.track[row.status] = Number(row.count || 0);
+  }
+
+  return result;
+}
+
+function searchCacheDiagnostics() {
+  const now = nowIso();
+  const row = db
+    .prepare(
+      `SELECT COUNT(*) AS rows,
+              SUM(CASE WHEN expires_at IS NULL OR expires_at > ? THEN 1 ELSE 0 END) AS fresh,
+              SUM(CASE WHEN expires_at IS NOT NULL AND expires_at <= ? THEN 1 ELSE 0 END) AS stale,
+              MAX(updated_at) AS newest_updated_at
+       FROM album_search_cache`
+    )
+    .get(now, now);
+  return {
+    rows: Number(row?.rows || 0),
+    fresh: Number(row?.fresh || 0),
+    stale: Number(row?.stale || 0),
+    maxRows: config.searchCacheMaxRows,
+    ttlHours: config.searchCacheTtlHours,
+    newestUpdatedAt: row?.newest_updated_at || null
+  };
+}
+
+function coverProbeCacheDiagnostics() {
+  const now = nowIso();
+  const row = db
+    .prepare(
+      `SELECT COUNT(*) AS rows,
+              SUM(CASE WHEN ok = 1 THEN 1 ELSE 0 END) AS successes,
+              SUM(CASE WHEN ok = 0 THEN 1 ELSE 0 END) AS failures,
+              SUM(CASE WHEN expires_at <= ? THEN 1 ELSE 0 END) AS expired,
+              MAX(checked_at) AS newest_checked_at
+       FROM cover_probe_cache`
+    )
+    .get(now);
+  return {
+    rows: Number(row?.rows || 0),
+    successes: Number(row?.successes || 0),
+    failures: Number(row?.failures || 0),
+    expired: Number(row?.expired || 0),
+    maxRows: config.coverProbeMaxRows,
+    successTtlHours: config.coverProbeSuccessTtlHours,
+    failureTtlHours: config.coverProbeFailureTtlHours,
+    newestCheckedAt: row?.newest_checked_at || null
+  };
+}
+
+function coverLookupFailureDiagnostics() {
+  const now = nowIso();
+  const row = db
+    .prepare(
+      `SELECT COUNT(*) AS rows,
+              SUM(CASE WHEN next_retry_at > ? THEN 1 ELSE 0 END) AS backed_off,
+              SUM(CASE WHEN next_retry_at <= ? THEN 1 ELSE 0 END) AS retry_due,
+              MAX(updated_at) AS newest_updated_at
+       FROM album_cover_lookup_failures`
+    )
+    .get(now, now);
+  return {
+    rows: Number(row?.rows || 0),
+    backedOff: Number(row?.backed_off || 0),
+    retryDue: Number(row?.retry_due || 0),
+    newestUpdatedAt: row?.newest_updated_at || null
+  };
+}
+
+function cacheDiagnostics() {
+  return {
+    search: searchCacheDiagnostics(),
+    coverProbe: coverProbeCacheDiagnostics(),
+    coverLookupFailures: coverLookupFailureDiagnostics()
+  };
+}
+
 function cleanupActiveVisitors() {
   const cutoff = new Date(Date.now() - activeVisitorRetentionMs).toISOString();
   db.prepare('DELETE FROM active_visitors WHERE last_seen_at < ?').run(cutoff);
@@ -1068,6 +1171,8 @@ app.get(
       activeVisitors: visitors,
       storage: storageUsage(),
       metadataQueue: metadataQueueDiagnostics(),
+      persistentCaches: cacheDiagnostics(),
+      hydrationStatus: hydrationStatusCounts(),
       localCoverCache: localCoverCacheSummary(),
       maintenance: {
         enabled: maintenanceMode()
@@ -1083,6 +1188,8 @@ app.get(
   route((req, res) => {
     res.json({
       metadataQueue: metadataQueueDiagnostics(),
+      persistentCaches: cacheDiagnostics(),
+      hydrationStatus: hydrationStatusCounts(),
       localCoverCache: localCoverCacheSummary()
     });
   })

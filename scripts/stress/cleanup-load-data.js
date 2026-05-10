@@ -52,8 +52,11 @@ try {
       db,
       `SELECT COUNT(*) AS count
        FROM bug_reports
-       WHERE body LIKE ? ESCAPE ?
+       WHERE title LIKE ? ESCAPE ?
+          OR description LIKE ? ESCAPE ?
           OR user_id IN (SELECT id FROM users WHERE ${matchingUsersWhere})`,
+      likePrefix,
+      '\\',
       likePrefix,
       '\\',
       likePrefix,
@@ -70,10 +73,11 @@ try {
     const reports = db
       .prepare(
         `DELETE FROM bug_reports
-         WHERE body LIKE ? ESCAPE ?
+         WHERE title LIKE ? ESCAPE ?
+            OR description LIKE ? ESCAPE ?
             OR user_id IN (SELECT id FROM users WHERE ${matchingUsersWhere})`
       )
-      .run(likePrefix, '\\', likePrefix, '\\', likePrefix, '\\').changes;
+      .run(likePrefix, '\\', likePrefix, '\\', likePrefix, '\\', likePrefix, '\\').changes;
     const lists = db.prepare('DELETE FROM lists WHERE name LIKE ? ESCAPE ?').run(likePrefix, '\\').changes;
     const users = db.prepare(`DELETE FROM users WHERE ${matchingUsersWhere}`).run(likePrefix, '\\', likePrefix, '\\').changes;
     db.exec('COMMIT');

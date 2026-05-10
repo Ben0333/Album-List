@@ -259,6 +259,57 @@ db.exec(`
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
   );
 
+  CREATE TABLE IF NOT EXISTS album_search_cache (
+    search_key TEXT PRIMARY KEY,
+    query TEXT NOT NULL,
+    normalized_query TEXT NOT NULL,
+    results_json TEXT NOT NULL,
+    source TEXT NOT NULL DEFAULT '',
+    result_count INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    expires_at TEXT
+  );
+
+  CREATE TABLE IF NOT EXISTS cover_probe_cache (
+    url_hash TEXT PRIMARY KEY,
+    url TEXT NOT NULL,
+    ok INTEGER NOT NULL CHECK (ok IN (0, 1)),
+    status_code INTEGER,
+    content_type TEXT NOT NULL DEFAULT '',
+    byte_size INTEGER,
+    final_url TEXT NOT NULL DEFAULT '',
+    failure_reason TEXT NOT NULL DEFAULT '',
+    checked_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    expires_at TEXT NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS album_cover_lookup_failures (
+    album_key TEXT PRIMARY KEY,
+    title TEXT NOT NULL,
+    artist TEXT NOT NULL DEFAULT '',
+    provider TEXT NOT NULL DEFAULT '',
+    attempts INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT NOT NULL DEFAULT '',
+    last_attempted_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    next_retry_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+  );
+
+  CREATE TABLE IF NOT EXISTS album_hydration_status (
+    album_key TEXT PRIMARY KEY,
+    title TEXT NOT NULL,
+    artist TEXT NOT NULL DEFAULT '',
+    metadata_status TEXT NOT NULL DEFAULT 'missing' CHECK (metadata_status IN ('missing', 'queued', 'hydrating', 'complete', 'failed', 'stale')),
+    cover_status TEXT NOT NULL DEFAULT 'missing' CHECK (cover_status IN ('missing', 'queued', 'hydrating', 'complete', 'failed', 'stale')),
+    track_status TEXT NOT NULL DEFAULT 'missing' CHECK (track_status IN ('missing', 'queued', 'hydrating', 'complete', 'failed', 'stale')),
+    metadata_updated_at TEXT,
+    cover_updated_at TEXT,
+    tracks_updated_at TEXT,
+    last_error TEXT NOT NULL DEFAULT '',
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+  );
+
   CREATE TABLE IF NOT EXISTS metadata_jobs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     job_key TEXT UNIQUE NOT NULL,
@@ -345,6 +396,16 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_album_image_cache_accessed ON album_image_cache(last_accessed_at);
   CREATE INDEX IF NOT EXISTS idx_album_image_cache_updated ON album_image_cache(updated_at);
   CREATE INDEX IF NOT EXISTS idx_album_image_cache_public_path ON album_image_cache(public_path);
+  CREATE INDEX IF NOT EXISTS idx_album_search_cache_expires ON album_search_cache(expires_at);
+  CREATE INDEX IF NOT EXISTS idx_album_search_cache_updated ON album_search_cache(updated_at);
+  CREATE INDEX IF NOT EXISTS idx_album_search_cache_normalized ON album_search_cache(normalized_query);
+  CREATE INDEX IF NOT EXISTS idx_cover_probe_cache_expires ON cover_probe_cache(expires_at);
+  CREATE INDEX IF NOT EXISTS idx_cover_probe_cache_checked ON cover_probe_cache(checked_at);
+  CREATE INDEX IF NOT EXISTS idx_album_cover_lookup_failures_retry ON album_cover_lookup_failures(next_retry_at);
+  CREATE INDEX IF NOT EXISTS idx_album_cover_lookup_failures_updated ON album_cover_lookup_failures(updated_at);
+  CREATE INDEX IF NOT EXISTS idx_album_hydration_status_metadata ON album_hydration_status(metadata_status);
+  CREATE INDEX IF NOT EXISTS idx_album_hydration_status_cover ON album_hydration_status(cover_status);
+  CREATE INDEX IF NOT EXISTS idx_album_hydration_status_track ON album_hydration_status(track_status);
   CREATE INDEX IF NOT EXISTS idx_metadata_jobs_claim ON metadata_jobs(status, priority, available_at, id);
   CREATE INDEX IF NOT EXISTS idx_metadata_jobs_album ON metadata_jobs(album_key);
   CREATE INDEX IF NOT EXISTS idx_metadata_jobs_updated ON metadata_jobs(updated_at);
@@ -593,6 +654,98 @@ db.prepare(
   `INSERT OR IGNORE INTO app_settings (key, value, description, updated_at)
    VALUES (?, ?, ?, ?)`
 ).run('maintenance_mode', '0', 'When set to 1, the public website returns a maintenance page and public API writes are unavailable.', new Date().toISOString());
+
+function backfillAlbumHydrationStatus() {
+  db.exec(`
+    INSERT INTO album_hydration_status
+      (album_key, title, artist, metadata_status, cover_status, track_status, metadata_updated_at, cover_updated_at, updated_at)
+    SELECT album_key,
+           title,
+           artist,
+           'complete',
+           CASE WHEN cover_url != '' THEN 'complete' ELSE 'missing' END,
+           'missing',
+           updated_at,
+           CASE WHEN cover_url != '' THEN updated_at ELSE NULL END,
+           updated_at
+    FROM album_metadata_cache
+    WHERE true
+    ON CONFLICT(album_key) DO UPDATE SET
+      title = CASE WHEN excluded.title != '' THEN excluded.title ELSE album_hydration_status.title END,
+      artist = CASE WHEN excluded.artist != '' THEN excluded.artist ELSE album_hydration_status.artist END,
+      metadata_status = CASE
+        WHEN album_hydration_status.metadata_status IN ('missing', 'stale') THEN 'complete'
+        ELSE album_hydration_status.metadata_status
+      END,
+      cover_status = CASE
+        WHEN excluded.cover_status = 'complete' AND album_hydration_status.cover_status IN ('missing', 'stale', 'failed') THEN 'complete'
+        ELSE album_hydration_status.cover_status
+      END,
+      metadata_updated_at = COALESCE(album_hydration_status.metadata_updated_at, excluded.metadata_updated_at),
+      cover_updated_at = COALESCE(album_hydration_status.cover_updated_at, excluded.cover_updated_at),
+      updated_at = excluded.updated_at;
+
+    INSERT INTO album_hydration_status
+      (album_key, title, artist, metadata_status, cover_status, track_status, updated_at)
+    SELECT la.album_key,
+           MAX(la.title),
+           MAX(la.artist),
+           'missing',
+           CASE WHEN MAX(CASE WHEN la.cover_url != '' THEN 1 ELSE 0 END) = 1 THEN 'complete' ELSE 'missing' END,
+           'missing',
+           MAX(la.updated_at)
+    FROM list_albums la
+    GROUP BY la.album_key
+    HAVING true
+    ON CONFLICT(album_key) DO UPDATE SET
+      title = CASE WHEN excluded.title != '' THEN excluded.title ELSE album_hydration_status.title END,
+      artist = CASE WHEN excluded.artist != '' THEN excluded.artist ELSE album_hydration_status.artist END,
+      cover_status = CASE
+        WHEN excluded.cover_status = 'complete' AND album_hydration_status.cover_status IN ('missing', 'stale', 'failed') THEN 'complete'
+        ELSE album_hydration_status.cover_status
+      END,
+      updated_at = CASE
+        WHEN excluded.updated_at > album_hydration_status.updated_at THEN excluded.updated_at
+        ELSE album_hydration_status.updated_at
+      END;
+
+    INSERT INTO album_hydration_status
+      (album_key, title, artist, metadata_status, cover_status, track_status, tracks_updated_at, updated_at)
+    SELECT atc.album_key,
+           COALESCE(am.title, la.title, atc.album_key),
+           COALESCE(am.artist, la.artist, ''),
+           CASE WHEN am.album_key IS NOT NULL THEN 'complete' ELSE 'missing' END,
+           CASE WHEN COALESCE(am.cover_url, la.cover_url, '') != '' THEN 'complete' ELSE 'missing' END,
+           'complete',
+           MAX(atc.updated_at),
+           MAX(atc.updated_at)
+    FROM album_track_cache atc
+    LEFT JOIN album_metadata_cache am ON am.album_key = atc.album_key
+    LEFT JOIN (
+      SELECT album_key, MAX(title) AS title, MAX(artist) AS artist, MAX(cover_url) AS cover_url
+      FROM list_albums
+      GROUP BY album_key
+    ) la ON la.album_key = atc.album_key
+    GROUP BY atc.album_key
+    HAVING true
+    ON CONFLICT(album_key) DO UPDATE SET
+      title = CASE WHEN excluded.title != '' THEN excluded.title ELSE album_hydration_status.title END,
+      artist = CASE WHEN excluded.artist != '' THEN excluded.artist ELSE album_hydration_status.artist END,
+      metadata_status = CASE
+        WHEN excluded.metadata_status = 'complete' AND album_hydration_status.metadata_status IN ('missing', 'stale', 'failed') THEN 'complete'
+        ELSE album_hydration_status.metadata_status
+      END,
+      cover_status = CASE
+        WHEN excluded.cover_status = 'complete' AND album_hydration_status.cover_status IN ('missing', 'stale', 'failed') THEN 'complete'
+        ELSE album_hydration_status.cover_status
+      END,
+      track_status = 'complete',
+      tracks_updated_at = excluded.tracks_updated_at,
+      updated_at = excluded.updated_at;
+  `);
+}
+
+backfillAlbumHydrationStatus();
 
 export function nowIso() {
   return new Date().toISOString();

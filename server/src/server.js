@@ -1,5 +1,6 @@
 ﻿import crypto from 'node:crypto';
 import fs from 'node:fs';
+import net from 'node:net';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import bcrypt from 'bcryptjs';
@@ -12,10 +13,15 @@ import { exploreLists as staticExploreLists } from './explore-data.js';
 import { createMetadataWorker } from './metadata-worker.js';
 import {
   enqueueMetadataJob,
-  enqueueMetadataJobs,
-  hasPendingMetadataHydration,
-  metadataQueueDiagnostics
+  metadataQueueDiagnostics,
+  pruneMetadataJobs
 } from './metadata-jobs.js';
+import {
+  albumHydrationStatus,
+  hydrationStatusCounts,
+  markHydrationJobStatus,
+  upsertAlbumHydrationStatus
+} from './hydration-status.js';
 import {
   cachedLocalCover,
   coverSourceForAlbum,
@@ -55,18 +61,20 @@ const platformAccents = {
   na: '#ff0033'
 };
 const exploreCoverMemoryCache = new Map();
-const albumSearchMemoryCache = new Map();
 const albumLookupMemoryCache = new Map();
 const imageProbeMemoryCache = new Map();
+const albumSearchRefreshes = new Map();
+const coverProbeRefreshes = new Map();
 const albumLevelTrackKey = '__album__';
 const hiddenExploreSlugs = new Set(['before-you-die', 'modern-classics', 'hip-hop-foundations', 'famous-band-essentials']);
 const maxAlbumsPerList = 500;
 const metadataUserAgent = `AlbumsToListenTo/0.1 (${config.appOrigin})`;
 const metadataCacheMaxEntries = 5000;
-const albumSearchCacheTtlMs = 5 * 60 * 1000;
 const albumLookupCacheTtlMs = 20 * 60 * 1000;
-const imageProbeSuccessTtlMs = 6 * 60 * 60 * 1000;
-const imageProbeFailureTtlMs = 15 * 60 * 1000;
+const searchCacheTtlMs = config.searchCacheTtlHours * 60 * 60 * 1000;
+const searchCacheStaleRetentionMs = Math.max(searchCacheTtlMs * 7, 7 * 24 * 60 * 60 * 1000);
+const coverProbeSuccessTtlMs = config.coverProbeSuccessTtlHours * 60 * 60 * 1000;
+const coverProbeFailureTtlMs = config.coverProbeFailureTtlHours * 60 * 60 * 1000;
 const activeVisitorWindowMs = 120 * 1000;
 const activeVisitorRetentionMs = 10 * 60 * 1000;
 const slowRequestMs = parsePositiveInteger(process.env.SLOW_REQUEST_MS, 750, { min: 1, max: 60_000 });
@@ -1077,6 +1085,82 @@ function cacheTextKey(value) {
   return String(value || '').trim().toLowerCase().normalize('NFKC').slice(0, 160);
 }
 
+function cacheHash(value) {
+  return crypto.createHash('sha256').update(String(value || '')).digest('hex');
+}
+
+function searchCacheSource(country = 'US') {
+  return `country:${String(country || 'US').trim().toUpperCase().slice(0, 8) || 'US'}`;
+}
+
+function searchCacheKey(term, country = 'US') {
+  return `${searchCacheSource(country)}:${cacheTextKey(term)}`;
+}
+
+function parseJsonArray(value) {
+  try {
+    const parsed = JSON.parse(String(value || '[]'));
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function cachedSearchResults(searchKey) {
+  const row = db.prepare('SELECT * FROM album_search_cache WHERE search_key = ?').get(searchKey);
+  if (!row) return null;
+  return {
+    results: parseJsonArray(row.results_json),
+    expiresAt: row.expires_at || null,
+    fresh: !row.expires_at || row.expires_at > nowIso()
+  };
+}
+
+function saveSearchResults(searchKeyValue, query, normalizedQuery, country, results) {
+  const updatedAt = nowIso();
+  const expiresAt = new Date(Date.now() + searchCacheTtlMs).toISOString();
+  const safeResults = Array.isArray(results) ? results : [];
+  db.prepare(
+    `INSERT INTO album_search_cache
+       (search_key, query, normalized_query, results_json, source, result_count, created_at, updated_at, expires_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(search_key) DO UPDATE SET
+       query = excluded.query,
+       normalized_query = excluded.normalized_query,
+       results_json = excluded.results_json,
+       source = excluded.source,
+       result_count = excluded.result_count,
+       updated_at = excluded.updated_at,
+       expires_at = excluded.expires_at`
+  ).run(
+    searchKeyValue,
+    clampText(query, 160),
+    normalizedQuery,
+    JSON.stringify(safeResults),
+    searchCacheSource(country),
+    safeResults.length,
+    updatedAt,
+    updatedAt,
+    expiresAt
+  );
+  pruneSearchCacheRows();
+}
+
+async function refreshSearchCache(searchKeyValue, query, normalizedQuery, country) {
+  const existing = albumSearchRefreshes.get(searchKeyValue);
+  if (existing) return existing;
+  const promise = searchAlbumsUncached(query, country)
+    .then((results) => {
+      saveSearchResults(searchKeyValue, query, normalizedQuery, country, results);
+      return results;
+    })
+    .finally(() => {
+      albumSearchRefreshes.delete(searchKeyValue);
+    });
+  albumSearchRefreshes.set(searchKeyValue, promise);
+  return promise;
+}
+
 function pruneCache(cache) {
   if (cache.size <= metadataCacheMaxEntries) return;
   const now = Date.now();
@@ -1115,43 +1199,173 @@ async function cachedMetadata(cache, key, ttlMs, loader) {
   return promise;
 }
 
+function isPrivateIpv4(hostname) {
+  const parts = hostname.split('.').map(Number);
+  if (parts.length !== 4 || parts.some((part) => !Number.isInteger(part) || part < 0 || part > 255)) return true;
+  return (
+    parts[0] === 0 ||
+    parts[0] === 10 ||
+    parts[0] === 127 ||
+    (parts[0] === 169 && parts[1] === 254) ||
+    (parts[0] === 172 && parts[1] >= 16 && parts[1] <= 31) ||
+    (parts[0] === 192 && parts[1] === 168)
+  );
+}
+
+function safeProbeImageUrl(value) {
+  const text = String(value || '').trim();
+  if (!text || text.length > 1000) return '';
+  try {
+    const url = new URL(text);
+    if (!['http:', 'https:'].includes(url.protocol)) return '';
+    if (url.username || url.password) return '';
+    const hostname = url.hostname.toLowerCase();
+    if (!hostname || hostname === 'localhost' || hostname.endsWith('.localhost')) return '';
+    const ipVersion = net.isIP(hostname);
+    if (ipVersion === 4 && isPrivateIpv4(hostname)) return '';
+    if (ipVersion === 6) {
+      if (hostname === '::1' || hostname.startsWith('fc') || hostname.startsWith('fd') || hostname.startsWith('fe80')) return '';
+    }
+    return url.href;
+  } catch {
+    return '';
+  }
+}
+
+function contentRangeTotal(value) {
+  const match = String(value || '').match(/\/(\d+)$/);
+  return match ? Number(match[1]) || null : null;
+}
+
+function coverProbeFailureTtl(statusCode, failureReason) {
+  if (statusCode === 404 || statusCode === 410) return 24 * 60 * 60 * 1000;
+  if (statusCode === 429 || statusCode >= 500 || failureReason === 'timeout') return 6 * 60 * 60 * 1000;
+  return coverProbeFailureTtlMs;
+}
+
+function cachedCoverProbe(safeUrl) {
+  const row = db.prepare('SELECT * FROM cover_probe_cache WHERE url_hash = ?').get(cacheHash(safeUrl));
+  if (!row || row.expires_at <= nowIso()) return null;
+  return Boolean(row.ok);
+}
+
+function saveCoverProbe(safeUrl, result) {
+  const ok = result.ok ? 1 : 0;
+  const checkedAt = nowIso();
+  const statusCode = result.statusCode ? Number(result.statusCode) : null;
+  const failureReason = clampText(result.failureReason || '', 160);
+  const ttlMs = ok ? coverProbeSuccessTtlMs : coverProbeFailureTtl(statusCode || 0, failureReason);
+  const expiresAt = new Date(Date.now() + ttlMs).toISOString();
+  db.prepare(
+    `INSERT INTO cover_probe_cache
+       (url_hash, url, ok, status_code, content_type, byte_size, final_url, failure_reason, checked_at, expires_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(url_hash) DO UPDATE SET
+       url = excluded.url,
+       ok = excluded.ok,
+       status_code = excluded.status_code,
+       content_type = excluded.content_type,
+       byte_size = excluded.byte_size,
+       final_url = excluded.final_url,
+       failure_reason = excluded.failure_reason,
+       checked_at = excluded.checked_at,
+       expires_at = excluded.expires_at`
+  ).run(
+    cacheHash(safeUrl),
+    safeUrl,
+    ok,
+    statusCode,
+    clampText(result.contentType || '', 120),
+    result.byteSize === undefined ? null : Number(result.byteSize) || null,
+    clampText(result.finalUrl || '', 1000),
+    failureReason,
+    checkedAt,
+    expiresAt
+  );
+  pruneCoverProbeCacheRows();
+}
+
+async function probeImageUrl(safeUrl) {
+  const existing = coverProbeRefreshes.get(safeUrl);
+  if (existing) return existing;
+  const promise = (async () => {
+    let lastStatusCode = null;
+    let lastContentType = '';
+    let lastFinalUrl = '';
+    let lastByteSize = null;
+    let lastFailureReason = 'not_image';
+
+    for (const method of ['HEAD', 'GET']) {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 8000);
+      try {
+        const headers = {
+          Accept: 'image/*',
+          'User-Agent': metadataUserAgent
+        };
+        if (method === 'GET') headers.Range = 'bytes=0-4095';
+        const response = await fetch(safeUrl, {
+          method,
+          signal: controller.signal,
+          headers
+        });
+        lastStatusCode = response.status;
+        lastContentType = String(response.headers.get('content-type') || '').split(';')[0].trim().toLowerCase();
+        lastFinalUrl = response.url || safeUrl;
+        lastByteSize =
+          contentRangeTotal(response.headers.get('content-range')) ||
+          Number(response.headers.get('content-length') || 0) ||
+          lastByteSize;
+        await response.body?.cancel?.();
+        if (response.ok && lastContentType.startsWith('image/')) {
+          return {
+            ok: true,
+            statusCode: lastStatusCode,
+            contentType: lastContentType,
+            byteSize: lastByteSize,
+            finalUrl: lastFinalUrl
+          };
+        }
+        lastFailureReason = response.ok ? 'not_image' : `http_${response.status}`;
+      } catch (error) {
+        lastFailureReason = error?.name === 'AbortError' ? 'timeout' : 'fetch_error';
+      } finally {
+        clearTimeout(timeout);
+      }
+    }
+
+    return {
+      ok: false,
+      statusCode: lastStatusCode,
+      contentType: lastContentType,
+      byteSize: lastByteSize,
+      finalUrl: lastFinalUrl,
+      failureReason: lastFailureReason
+    };
+  })().finally(() => {
+    coverProbeRefreshes.delete(safeUrl);
+  });
+  coverProbeRefreshes.set(safeUrl, promise);
+  return promise;
+}
+
 async function imageUrlWorks(value) {
   const safeUrl = safeExternalImageUrl(value);
   if (!safeUrl) return false;
   if (isLocalCoverPublicPath(safeUrl)) return localCoverExists(safeUrl);
-  const cached = imageProbeMemoryCache.get(safeUrl);
+  const probeUrl = safeProbeImageUrl(safeUrl);
+  if (!probeUrl) return false;
+  const cachedPersistent = cachedCoverProbe(probeUrl);
+  if (cachedPersistent !== null) return cachedPersistent;
+  const cached = imageProbeMemoryCache.get(probeUrl);
   if (cached && cached.expiresAt > Date.now()) return cached.works;
 
-  let works = false;
-  for (const method of ['HEAD', 'GET']) {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 8000);
-    try {
-      const headers = {
-        Accept: 'image/*',
-        'User-Agent': metadataUserAgent
-      };
-      if (method === 'GET') headers.Range = 'bytes=0-4095';
-      const response = await fetch(safeUrl, {
-        method,
-        signal: controller.signal,
-        headers
-      });
-      const contentType = String(response.headers.get('content-type') || '').toLowerCase();
-      await response.body?.cancel?.();
-      if (response.ok && contentType.startsWith('image/')) {
-        works = true;
-        break;
-      }
-    } catch {
-      // Try the next probing method before giving up.
-    } finally {
-      clearTimeout(timeout);
-    }
-  }
-  imageProbeMemoryCache.set(safeUrl, {
+  const result = await probeImageUrl(probeUrl);
+  const works = Boolean(result.ok);
+  saveCoverProbe(probeUrl, result);
+  imageProbeMemoryCache.set(probeUrl, {
     works,
-    expiresAt: Date.now() + (works ? imageProbeSuccessTtlMs : imageProbeFailureTtlMs)
+    expiresAt: Date.now() + (works ? Math.min(coverProbeSuccessTtlMs, 60 * 60 * 1000) : Math.min(coverProbeFailureTtlMs, 15 * 60 * 1000))
   });
   pruneCache(imageProbeMemoryCache);
   return works;
@@ -1808,8 +2022,20 @@ async function searchAlbumsUncached(term, country = 'US') {
 }
 
 async function searchAlbums(term, country = 'US') {
-  const key = `${String(country || 'US').toUpperCase()}:${cacheTextKey(term)}`;
-  return cachedMetadata(albumSearchMemoryCache, key, albumSearchCacheTtlMs, () => searchAlbumsUncached(term, country));
+  const query = clampText(term, 120);
+  if (query.length < 2) return [];
+  const normalizedQuery = cacheTextKey(query);
+  const key = searchCacheKey(query, country);
+  const cached = cachedSearchResults(key);
+  if (cached) {
+    if (!cached.fresh) {
+      refreshSearchCache(key, query, normalizedQuery, country).catch((error) => {
+        console.error(JSON.stringify({ event: 'search_cache_refresh_failure', searchKey: key, error: String(error?.message || error) }));
+      });
+    }
+    return cached.results;
+  }
+  return refreshSearchCache(key, query, normalizedQuery, country);
 }
 
 function albumSearchQualityScore(album) {
@@ -2124,6 +2350,7 @@ function saveAlbumCover(title, artist, coverUrl, source = '') {
   if (!key || !safeCoverUrl) return '';
   if (isLocalCoverPublicPath(safeCoverUrl)) return safeCoverUrl;
   rememberCoverSource(key, safeCoverUrl);
+  const updatedAt = nowIso();
   db.prepare(
     `INSERT INTO album_cover_cache (album_key, title, artist, cover_url, source, updated_at)
      VALUES (?, ?, ?, ?, ?, ?)
@@ -2133,8 +2360,71 @@ function saveAlbumCover(title, artist, coverUrl, source = '') {
        cover_url = excluded.cover_url,
        source = excluded.source,
        updated_at = excluded.updated_at`
-  ).run(key, clampText(title, 160), clampText(artist, 160), safeCoverUrl, clampText(source, 80), nowIso());
+  ).run(key, clampText(title, 160), clampText(artist, 160), safeCoverUrl, clampText(source, 80), updatedAt);
+  upsertAlbumHydrationStatus(
+    { albumKey: key, title, artist },
+    { coverStatus: 'complete', coverUpdatedAt: updatedAt, lastError: '' }
+  );
+  clearAlbumCoverLookupFailure(key);
   return safeCoverUrl;
+}
+
+function coverLookupFailureDelayMs(attempts) {
+  const retryIndex = Math.max(0, Number(attempts || 1) - 1);
+  const baseMs = config.coverLookupFailureBaseMinutes * 60 * 1000;
+  const maxMs = config.coverLookupFailureMaxHours * 60 * 60 * 1000;
+  return Math.min(maxMs, Math.round(baseMs * 2 ** retryIndex));
+}
+
+function albumCoverLookupBackoff(albumKeyValue) {
+  const key = clampText(albumKeyValue, 320);
+  if (!key) return null;
+  const row = db.prepare('SELECT * FROM album_cover_lookup_failures WHERE album_key = ?').get(key);
+  if (!row || row.next_retry_at <= nowIso()) return null;
+  return row;
+}
+
+function clearAlbumCoverLookupFailure(albumKeyValue) {
+  const key = clampText(albumKeyValue, 320);
+  if (!key) return;
+  db.prepare('DELETE FROM album_cover_lookup_failures WHERE album_key = ?').run(key);
+}
+
+function recordAlbumCoverLookupFailure(title, artist, provider = '', error = '') {
+  const cleanTitle = clampText(title, 160);
+  if (!cleanTitle) return null;
+  const cleanArtist = clampText(artist, 160);
+  const key = albumKey(cleanTitle, cleanArtist);
+  if (!key) return null;
+  const previous = db.prepare('SELECT attempts FROM album_cover_lookup_failures WHERE album_key = ?').get(key);
+  const attempts = Number(previous?.attempts || 0) + 1;
+  const attemptedAt = nowIso();
+  const nextRetryAt = new Date(Date.now() + coverLookupFailureDelayMs(attempts)).toISOString();
+  db.prepare(
+    `INSERT INTO album_cover_lookup_failures
+       (album_key, title, artist, provider, attempts, last_error, last_attempted_at, next_retry_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(album_key) DO UPDATE SET
+       title = excluded.title,
+       artist = excluded.artist,
+       provider = excluded.provider,
+       attempts = excluded.attempts,
+       last_error = excluded.last_error,
+       last_attempted_at = excluded.last_attempted_at,
+       next_retry_at = excluded.next_retry_at,
+       updated_at = excluded.updated_at`
+  ).run(
+    key,
+    cleanTitle,
+    cleanArtist,
+    clampText(provider, 80),
+    attempts,
+    clampText(error || 'No working cover found.', 1000),
+    attemptedAt,
+    nextRetryAt,
+    attemptedAt
+  );
+  return { attempts, nextRetryAt };
 }
 
 function safeCoverUrlList(values) {
@@ -2218,6 +2508,7 @@ function saveCanonicalAlbumMetadata(albumInput, source = '') {
   const key = albumKey(title, artist);
   if (!key) return '';
   const coverUrl = safeExternalImageUrl(albumInput?.coverUrl || albumInput?.cover_url);
+  const updatedAt = nowIso();
   db.prepare(
     `INSERT INTO album_metadata_cache (album_key, title, artist, cover_url, source, updated_at)
      VALUES (?, ?, ?, ?, ?, ?)
@@ -2230,7 +2521,17 @@ function saveCanonicalAlbumMetadata(albumInput, source = '') {
        END,
        source = excluded.source,
        updated_at = excluded.updated_at`
-  ).run(key, title, artist, coverUrl, clampText(source, 80), nowIso());
+  ).run(key, title, artist, coverUrl, clampText(source, 80), updatedAt);
+  upsertAlbumHydrationStatus(
+    { albumKey: key, title, artist },
+    {
+      metadataStatus: 'complete',
+      coverStatus: coverUrl ? 'complete' : undefined,
+      metadataUpdatedAt: updatedAt,
+      coverUpdatedAt: coverUrl ? updatedAt : undefined,
+      lastError: ''
+    }
+  );
   if (coverUrl) saveAlbumCover(title, artist, coverUrl, source);
   return key;
 }
@@ -2244,6 +2545,58 @@ function cachedTracksForAlbumKey(albumKeyValue) {
        ORDER BY disc_number, position, rowid, track_key`
     )
     .all(albumKeyValue);
+}
+
+function clientHydrationStatus(albumKeyValue, title = '', artist = '', { tracks = [], coverUrl = '' } = {}) {
+  const key = clampText(albumKeyValue, 320);
+  if (!key) {
+    return {
+      metadataStatus: 'missing',
+      coverStatus: 'missing',
+      trackStatus: 'missing',
+      lastError: ''
+    };
+  }
+
+  let row = albumHydrationStatus(key);
+  if (!row) {
+    upsertAlbumHydrationStatus({ albumKey: key, title, artist });
+    row = albumHydrationStatus(key);
+  }
+
+  const updates = {};
+  const safeCoverUrl = safeExternalImageUrl(coverUrl);
+  if (tracks.length && row?.track_status !== 'complete') {
+    updates.trackStatus = 'complete';
+    updates.tracksUpdatedAt = nowIso();
+  }
+  if ((cachedLocalCover(key) || safeCoverUrl) && row?.cover_status !== 'complete') {
+    updates.coverStatus = 'complete';
+    updates.coverUpdatedAt = nowIso();
+  }
+  if (Object.keys(updates).length) {
+    upsertAlbumHydrationStatus({ albumKey: key, title, artist }, updates);
+    row = albumHydrationStatus(key);
+  }
+
+  return {
+    metadataStatus: row?.metadata_status || 'missing',
+    coverStatus: row?.cover_status || 'missing',
+    trackStatus: row?.track_status || 'missing',
+    metadataUpdatedAt: row?.metadata_updated_at || null,
+    coverUpdatedAt: row?.cover_updated_at || null,
+    tracksUpdatedAt: row?.tracks_updated_at || null,
+    lastError: row?.last_error || ''
+  };
+}
+
+function hydrationPendingFromStatus(status, tracks = []) {
+  const active = new Set(['queued', 'hydrating']);
+  return (
+    active.has(status?.trackStatus) ||
+    active.has(status?.coverStatus) ||
+    (!tracks.length && !['complete', 'failed'].includes(status?.trackStatus || 'missing'))
+  );
 }
 
 function copyCachedTracksToListAlbum(listAlbumId, albumKeyValue) {
@@ -2292,6 +2645,10 @@ function saveCanonicalAlbumTracks(albumInput, source = '') {
     for (const track of tracks) {
       insertTrack.run(key, track.trackKey, track.title, track.discNumber || 1, track.position, updatedAt);
     }
+    upsertAlbumHydrationStatus(
+      { albumKey: key, title: albumInput?.title, artist: albumInput?.artist },
+      { trackStatus: 'complete', tracksUpdatedAt: updatedAt, lastError: '' }
+    );
   })();
   copyCachedTracksToListAlbums(key);
 }
@@ -2311,11 +2668,19 @@ function queueCoverJobForAlbum(albumInput, { priority = 50, sourceContext = '', 
   const key = albumKey(title, artist);
   const coverUrl = safeExternalImageUrl(albumInput?.coverUrl || albumInput?.cover_url);
   if (coverUrl && !isLocalCoverPublicPath(coverUrl)) rememberCoverSource(key, coverUrl);
-  if (cachedLocalCover(key) && !force) return null;
+  if (force) clearAlbumCoverLookupFailure(key);
+  if (cachedLocalCover(key) && !force) {
+    upsertAlbumHydrationStatus({ albumKey: key, title, artist }, { coverStatus: 'complete', coverUpdatedAt: nowIso(), lastError: '' });
+    return null;
+  }
+  if (!force && albumCoverLookupBackoff(key)) {
+    upsertAlbumHydrationStatus({ albumKey: key, title, artist }, { coverStatus: 'failed' });
+    return null;
+  }
   const needsLocalRedownload = Boolean(!cachedLocalCover(key) && (coverSourceForAlbum(key) || (coverUrl && !isLocalCoverPublicPath(coverUrl))));
   const providerId = providerIdFromAlbumInput(albumInput);
   const context = sourceContextFromAlbumInput(albumInput, sourceContext);
-  return enqueueMetadataJob(
+  const jobKey = enqueueMetadataJob(
     {
       kind: context.startsWith('explore:') ? 'explore_cover' : 'cover',
       albumKey: key,
@@ -2327,6 +2692,11 @@ function queueCoverJobForAlbum(albumInput, { priority = 50, sourceContext = '', 
     },
     { force: force || needsLocalRedownload }
   );
+  const queuedStatus = jobKey ? db.prepare('SELECT status FROM metadata_jobs WHERE job_key = ?').get(jobKey)?.status : '';
+  if (queuedStatus === 'queued' || queuedStatus === 'running') {
+    upsertAlbumHydrationStatus({ albumKey: key, title, artist }, { coverStatus: queuedStatus === 'running' ? 'hydrating' : 'queued' });
+  }
+  return jobKey;
 }
 
 function queueAlbumHydrationJobs(albumInput, { priority = 20, sourceContext = '', forceCover = false } = {}) {
@@ -2337,8 +2707,9 @@ function queueAlbumHydrationJobs(albumInput, { priority = 20, sourceContext = ''
   saveCanonicalAlbumMetadata(albumInput, sourceContext || 'metadata-queue');
   const providerId = providerIdFromAlbumInput(albumInput);
   const context = sourceContextFromAlbumInput(albumInput, sourceContext);
-  const jobs = [
-    {
+  const keys = [];
+  keys.push(
+    enqueueMetadataJob({
       kind: 'album_metadata',
       albumKey: key,
       title,
@@ -2346,18 +2717,27 @@ function queueAlbumHydrationJobs(albumInput, { priority = 20, sourceContext = ''
       providerId,
       sourceContext: context,
       priority
-    },
-    {
-      kind: 'tracklist',
-      albumKey: key,
-      title,
-      artist,
-      providerId,
-      sourceContext: context,
-      priority: priority + 5
-    }
-  ];
-  const keys = enqueueMetadataJobs(jobs);
+    })
+  );
+  const hasCachedTracks = cachedTracksForAlbumKey(key).length > 0;
+  keys.push(
+    enqueueMetadataJob(
+      {
+        kind: 'tracklist',
+        albumKey: key,
+        title,
+        artist,
+        providerId,
+        sourceContext: context,
+        priority: priority + 5
+      },
+      { force: !hasCachedTracks }
+    )
+  );
+  upsertAlbumHydrationStatus(
+    { albumKey: key, title, artist },
+    { trackStatus: hasCachedTracks ? 'complete' : 'queued' }
+  );
   const coverJobKey = queueCoverJobForAlbum(albumInput, {
     priority: priority + 3,
     sourceContext: context,
@@ -2415,24 +2795,35 @@ async function resolveVerifiedAlbumCover(title, artist, country = 'US', excluded
   };
   for (const cached of storedAlbumCoverCandidates(title, artist)) {
     if (excluded.has(cached)) continue;
-    if (await imageUrlWorks(cached)) return saveAlbumCover(title, artist, cached, 'verified-cache');
+    if (await imageUrlWorks(cached)) {
+      clearAlbumCoverLookupFailure(albumKey(title, artist));
+      return saveAlbumCover(title, artist, cached, 'verified-cache');
+    }
     rejected.add(cached);
   }
   if (rejected.size) clearBadAlbumCoverReferences(title, artist, [...rejected]);
   for (const album of await albumCoverCandidates(title, artist, country)) {
     for (const coverUrl of coverCandidatesForLookupAlbum(album)) {
       const verified = await tryCoverUrl(coverUrl, album.provider || 'metadata');
-      if (verified) return verified;
+      if (verified) {
+        clearAlbumCoverLookupFailure(albumKey(title, artist));
+        return verified;
+      }
     }
     if (String(album.providerId || '').startsWith('mb:')) {
       const lookup = await lookupAlbum(album.providerId, country).catch(() => null);
       for (const coverUrl of coverCandidatesForLookupAlbum(lookup)) {
         const verified = await tryCoverUrl(coverUrl, 'musicbrainz-catalog');
-        if (verified) return verified;
+        if (verified) {
+          clearAlbumCoverLookupFailure(albumKey(title, artist));
+          return verified;
+        }
       }
     }
   }
   if (rejected.size) clearBadAlbumCoverReferences(title, artist, [...rejected]);
+  recordAlbumCoverLookupFailure(title, artist, 'metadata', 'No working cover found.');
+  upsertAlbumHydrationStatus({ albumKey: albumKey(title, artist), title, artist }, { coverStatus: 'failed', lastError: 'No working cover found.' });
   return '';
 }
 
@@ -3154,7 +3545,10 @@ function buildListAlbumPayload(list, user, album, access) {
     : null;
 
   const displayCoverUrl = safeExternalImageUrl(album.cover_url);
-  const queuedHydration = !tracks.length && hasPendingMetadataHydration(album.album_key);
+  let hydrationStatus = clientHydrationStatus(album.album_key, album.title, album.artist, {
+    tracks,
+    coverUrl: displayCoverUrl
+  });
   if (!tracks.length) {
     queueAlbumHydrationJobs(
       { title: album.title, artist: album.artist, coverUrl: displayCoverUrl, sourceContext: 'list-view' },
@@ -3166,6 +3560,10 @@ function buildListAlbumPayload(list, user, album, access) {
       { priority: 55, sourceContext: 'list-view' }
     );
   }
+  hydrationStatus = clientHydrationStatus(album.album_key, album.title, album.artist, {
+    tracks,
+    coverUrl: displayCoverUrl
+  });
 
   const ratingsByUser =
     showNamedRatings
@@ -3207,7 +3605,8 @@ function buildListAlbumPayload(list, user, album, access) {
     createdAt: album.created_at,
     updatedAt: album.updated_at,
     tracks,
-    hydrationPending: !tracks.length && (queuedHydration || hasPendingMetadataHydration(album.album_key)),
+    hydrationStatus,
+    hydrationPending: hydrationPendingFromStatus(hydrationStatus, tracks),
     completions,
     pendingMembers,
     currentUserCompleted: Boolean(user && completedIds.has(user.id)),
@@ -3752,6 +4151,13 @@ async function cacheLocalCoverForAlbum(albumInput, sourceContext = '') {
     artist,
     sourceUrl
   });
+  if (downloaded?.publicPath) {
+    upsertAlbumHydrationStatus(
+      { albumKey: key, title, artist },
+      { coverStatus: 'complete', coverUpdatedAt: nowIso(), lastError: '' }
+    );
+    clearAlbumCoverLookupFailure(key);
+  }
   const context = sourceContext || albumInput?.sourceContext || albumInput?.source_context || '';
   const exploreContext = context ? exploreContextFromJob({ source_context: context }) : null;
   if (downloaded?.publicPath && exploreContext) {
@@ -3777,11 +4183,15 @@ async function hydrateAlbumMetadataJob(job) {
 async function hydrateTracklistJob(job) {
   if (cachedTracksForAlbumKey(job.album_key).length) {
     copyCachedTracksToListAlbums(job.album_key);
+    markHydrationJobStatus(job, 'complete');
     return;
   }
   const lookup = await lookupAlbumForMetadataJob(job);
   const tracks = sanitizeTracks(lookup?.tracks);
-  if (!tracks.length) return;
+  if (!tracks.length) {
+    markHydrationJobStatus(job, 'failed', 'No tracks found for album.');
+    return;
+  }
   const albumInput = {
     title: clampText(lookup.title || job.title, 160),
     artist: clampText(lookup.artist || job.artist, 160),
@@ -3800,6 +4210,8 @@ async function hydrateCoverJob(job) {
   if (existing) {
     const exploreContext = exploreContextFromJob(job);
     if (exploreContext) saveExploreCover(exploreContext.list.slug, exploreContext.index, exploreContext.album, existing);
+    markHydrationJobStatus(job, 'complete');
+    clearAlbumCoverLookupFailure(key);
     return;
   }
 
@@ -3822,9 +4234,19 @@ async function hydrateCoverJob(job) {
     if (sourceUrl) saveCanonicalAlbumMetadata({ title: lookup?.title || title, artist: lookup?.artist || artist, coverUrl: sourceUrl }, 'cover-worker');
   }
   if (!sourceUrl) sourceUrl = await resolveVerifiedAlbumCover(title, artist, 'US').catch(() => '');
-  if (!sourceUrl || isLocalCoverPublicPath(sourceUrl)) return;
+  if (!sourceUrl || isLocalCoverPublicPath(sourceUrl)) {
+    markHydrationJobStatus(job, 'failed', 'No working cover found.');
+    return;
+  }
   rememberCoverSource(key, sourceUrl);
-  await cacheLocalCoverForAlbum({ title, artist, coverUrl: sourceUrl, sourceContext: job.source_context }, job.source_context);
+  try {
+    await cacheLocalCoverForAlbum({ title, artist, coverUrl: sourceUrl, sourceContext: job.source_context }, job.source_context);
+    clearAlbumCoverLookupFailure(key);
+    markHydrationJobStatus(job, 'complete');
+  } catch (error) {
+    recordAlbumCoverLookupFailure(title, artist, job.kind || 'cover', error?.message || error);
+    throw error;
+  }
 }
 
 function listAlbumsForAlbumKey(albumKeyValue) {
@@ -3951,6 +4373,7 @@ async function hydratedAlbumInputForKey(albumKeyValue, req, options = {}) {
   const forceCoverRefresh = Boolean(options.forceCoverRefresh);
   const forceMetadataRefresh = Boolean(options.forceMetadataRefresh);
   const fast = Boolean(options.fast);
+  if (forceCoverRefresh) clearAlbumCoverLookupFailure(albumKeyValue);
   let coverUrl = '';
   const storedCoverUrl = safeExternalImageUrl(metadata.cover_url) || cachedAlbumCover(title, artist);
   if (storedCoverUrl) {
@@ -4028,13 +4451,18 @@ async function hydratedAlbumInputForKey(albumKeyValue, req, options = {}) {
       }
     );
   }
+  const hydrationStatus = clientHydrationStatus(albumKeyValue, title, artist, {
+    tracks,
+    coverUrl
+  });
   return {
     album_key: albumKeyValue,
     title,
     artist,
     cover_url: coverUrl,
     tracks,
-    hydration_pending: Boolean(fast && (!tracks.length || !coverUrl))
+    hydration_status: hydrationStatus,
+    hydration_pending: hydrationPendingFromStatus(hydrationStatus, tracks)
   };
 }
 
@@ -4070,6 +4498,12 @@ function trackPayloadForAlbum(albumKeyValue, track, index, user) {
 
 function buildCanonicalAlbumPayload(album, user) {
   const albumKeyValue = album.album_key;
+  const hydrationStatus =
+    album.hydration_status ||
+    clientHydrationStatus(albumKeyValue, album.title, album.artist, {
+      tracks: album.tracks || [],
+      coverUrl: album.cover_url
+    });
   const optInRow = user
     ? db.prepare('SELECT include_in_average FROM album_average_opt_in WHERE user_id = ? AND album_key = ?').get(user.id, albumKeyValue)
     : null;
@@ -4103,7 +4537,8 @@ function buildCanonicalAlbumPayload(album, user) {
     coverUrl: safeExternalImageUrl(album.cover_url),
     externalUrl: albumExternalUrl(album, user?.musicPlatform || 'na'),
     tracks: album.tracks.map((track, index) => trackPayloadForAlbum(albumKeyValue, track, index, user)),
-    hydrationPending: Boolean(album.hydration_pending),
+    hydrationStatus,
+    hydrationPending: hydrationPendingFromStatus(hydrationStatus, album.tracks || []),
     currentUserCompleted: Boolean(user && userAlbumFullyListened(user.id, albumKeyValue)),
     currentUserFullyRated: Boolean(user && userAlbumFullyRated(user.id, albumKeyValue)),
     currentUserAverageOptIn: optInRow ? Boolean(optInRow.include_in_average) : true,
@@ -4295,6 +4730,119 @@ function cleanupActiveVisitors() {
   db.prepare('DELETE FROM active_visitors WHERE last_seen_at < ?').run(cutoff);
 }
 
+function pruneSearchCacheRows() {
+  const expiredBefore = new Date(Date.now() - searchCacheStaleRetentionMs).toISOString();
+  const expired = db.prepare('DELETE FROM album_search_cache WHERE expires_at IS NOT NULL AND expires_at < ?').run(expiredBefore).changes;
+  const overflow = db
+    .prepare(
+      `DELETE FROM album_search_cache
+       WHERE search_key IN (
+         SELECT search_key
+         FROM album_search_cache
+         ORDER BY updated_at DESC, search_key DESC
+         LIMIT -1 OFFSET ?
+       )`
+    )
+    .run(config.searchCacheMaxRows).changes;
+  return { expired, overflow };
+}
+
+function pruneCoverProbeCacheRows() {
+  const expired = db.prepare('DELETE FROM cover_probe_cache WHERE expires_at < ?').run(nowIso()).changes;
+  const overflow = db
+    .prepare(
+      `DELETE FROM cover_probe_cache
+       WHERE url_hash IN (
+         SELECT url_hash
+         FROM cover_probe_cache
+         ORDER BY checked_at DESC, url_hash DESC
+         LIMIT -1 OFFSET ?
+       )`
+    )
+    .run(config.coverProbeMaxRows).changes;
+  return { expired, overflow };
+}
+
+function prunePersistentCacheRows() {
+  return {
+    searchCache: pruneSearchCacheRows(),
+    coverProbeCache: pruneCoverProbeCacheRows(),
+    metadataJobsDeleted: pruneMetadataJobs()
+  };
+}
+
+function searchCacheDiagnostics() {
+  const now = nowIso();
+  const row = db
+    .prepare(
+      `SELECT COUNT(*) AS rows,
+              SUM(CASE WHEN expires_at IS NULL OR expires_at > ? THEN 1 ELSE 0 END) AS fresh,
+              SUM(CASE WHEN expires_at IS NOT NULL AND expires_at <= ? THEN 1 ELSE 0 END) AS stale,
+              MAX(updated_at) AS newest_updated_at
+       FROM album_search_cache`
+    )
+    .get(now, now);
+  return {
+    rows: Number(row?.rows || 0),
+    fresh: Number(row?.fresh || 0),
+    stale: Number(row?.stale || 0),
+    maxRows: config.searchCacheMaxRows,
+    ttlHours: config.searchCacheTtlHours,
+    newestUpdatedAt: row?.newest_updated_at || null
+  };
+}
+
+function coverProbeCacheDiagnostics() {
+  const now = nowIso();
+  const row = db
+    .prepare(
+      `SELECT COUNT(*) AS rows,
+              SUM(CASE WHEN ok = 1 THEN 1 ELSE 0 END) AS successes,
+              SUM(CASE WHEN ok = 0 THEN 1 ELSE 0 END) AS failures,
+              SUM(CASE WHEN expires_at <= ? THEN 1 ELSE 0 END) AS expired,
+              MAX(checked_at) AS newest_checked_at
+       FROM cover_probe_cache`
+    )
+    .get(now);
+  return {
+    rows: Number(row?.rows || 0),
+    successes: Number(row?.successes || 0),
+    failures: Number(row?.failures || 0),
+    expired: Number(row?.expired || 0),
+    maxRows: config.coverProbeMaxRows,
+    successTtlHours: config.coverProbeSuccessTtlHours,
+    failureTtlHours: config.coverProbeFailureTtlHours,
+    newestCheckedAt: row?.newest_checked_at || null
+  };
+}
+
+function coverLookupFailureDiagnostics() {
+  const now = nowIso();
+  const row = db
+    .prepare(
+      `SELECT COUNT(*) AS rows,
+              SUM(CASE WHEN next_retry_at > ? THEN 1 ELSE 0 END) AS backed_off,
+              SUM(CASE WHEN next_retry_at <= ? THEN 1 ELSE 0 END) AS retry_due,
+              MAX(updated_at) AS newest_updated_at
+       FROM album_cover_lookup_failures`
+    )
+    .get(now, now);
+  return {
+    rows: Number(row?.rows || 0),
+    backedOff: Number(row?.backed_off || 0),
+    retryDue: Number(row?.retry_due || 0),
+    newestUpdatedAt: row?.newest_updated_at || null
+  };
+}
+
+function cacheDiagnostics() {
+  return {
+    search: searchCacheDiagnostics(),
+    coverProbe: coverProbeCacheDiagnostics(),
+    coverLookupFailures: coverLookupFailureDiagnostics()
+  };
+}
+
 function safeVisitorId(value) {
   const text = String(value || '').trim();
   return /^[a-zA-Z0-9_-]{16,80}$/.test(text) ? text : randomToken(24);
@@ -4331,6 +4879,8 @@ app.get(
         shmBytes: fileSize(`${databasePath}-shm`)
       },
       metadataQueue: metadataQueueDiagnostics(),
+      persistentCaches: cacheDiagnostics(),
+      hydrationStatus: hydrationStatusCounts(),
       localCoverCache: localCoverCacheSummary(),
       rateLimitBuckets: rateLimitBuckets.size
     });
@@ -5357,6 +5907,7 @@ app.post(
     const force = req.body?.force === true;
     const currentCoverUrl = safeExternalImageUrl(album.cover_url);
     const excludedCoverUrls = safeCoverUrlList([req.body?.brokenUrl, force ? currentCoverUrl : '']);
+    if (force) clearAlbumCoverLookupFailure(album.album_key);
     const currentStillWorks = !force && currentCoverUrl ? await imageUrlWorks(currentCoverUrl) : false;
     if (!currentStillWorks && currentCoverUrl) excludedCoverUrls.push(currentCoverUrl);
     const refreshedCoverUrl = currentStillWorks
@@ -5377,6 +5928,8 @@ app.post(
       repairAlbumCoverReferences(album.title, album.artist, refreshedCoverUrl, excludedCoverUrls, 'cover-refresh');
       const localCover = await cacheLocalCoverForAlbum({ title: album.title, artist: album.artist, coverUrl: refreshedCoverUrl }, 'cover-refresh');
       if (localCover?.publicPath) nextCoverUrl = localCover.publicPath;
+    } else if (!currentStillWorks) {
+      recordAlbumCoverLookupFailure(album.title, album.artist, 'manual-refresh', 'No working cover found.');
     }
 
     res.json({
@@ -5886,6 +6439,16 @@ app.use((err, req, res, next) => {
 cleanupExpiredSessions();
 
 try {
+  const persistentPruned = prunePersistentCacheRows();
+  if (
+    persistentPruned.searchCache.expired ||
+    persistentPruned.searchCache.overflow ||
+    persistentPruned.coverProbeCache.expired ||
+    persistentPruned.coverProbeCache.overflow ||
+    persistentPruned.metadataJobsDeleted
+  ) {
+    console.log(JSON.stringify({ event: 'persistent_cache_pruned', ...persistentPruned }));
+  }
   const pruned = pruneLocalCoverCache();
   if (pruned.evictedCount) {
     console.log(JSON.stringify({ event: 'local_cover_cache_pruned', evictedCount: pruned.evictedCount }));

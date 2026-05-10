@@ -461,6 +461,10 @@ async function loadSummary({ silent = false } = {}) {
     target.append(maintenanceCard(data.maintenance));
     target.append(storageCard(data.storage));
     target.append(metadataQueueCard(data.metadataQueue));
+    target.append(searchCacheCard(data.persistentCaches?.search));
+    target.append(coverProbeCacheCard(data.persistentCaches?.coverProbe));
+    target.append(coverFailureCard(data.persistentCaches?.coverLookupFailures));
+    target.append(hydrationStatusCard(data.hydrationStatus));
     target.append(localCoverCacheCard(data.localCoverCache));
     target.append(activeVisitorsCard(data.activeVisitors));
   } catch (error) {
@@ -491,6 +495,40 @@ function localCoverCacheCard(localCoverCache) {
         ? `Retaining up to ${maxImages} images. Newest access ${formatDate(localCoverCache?.newestAccessedAt) || 'n/a'}`
         : 'Local cover cache limits unavailable'
     })
+  ]);
+}
+
+function searchCacheCard(searchCache) {
+  return el('div', { className: 'stat' }, [
+    el('b', { text: searchCache?.rows ?? 0 }),
+    el('span', { text: `Search cache: ${searchCache?.fresh ?? 0} fresh, ${searchCache?.stale ?? 0} stale` }),
+    el('small', { text: `TTL ${searchCache?.ttlHours ?? 24}h, max rows ${searchCache?.maxRows ?? 0}` })
+  ]);
+}
+
+function coverProbeCacheCard(coverProbe) {
+  return el('div', { className: 'stat' }, [
+    el('b', { text: coverProbe?.rows ?? 0 }),
+    el('span', { text: `Cover probes: ${coverProbe?.successes ?? 0} ok, ${coverProbe?.failures ?? 0} failed` }),
+    el('small', { text: coverProbe?.newestCheckedAt ? `Newest check ${formatDate(coverProbe.newestCheckedAt)}` : 'No cover probes cached' })
+  ]);
+}
+
+function coverFailureCard(failures) {
+  return el('div', { className: 'stat' }, [
+    el('b', { text: failures?.rows ?? 0 }),
+    el('span', { text: `Cover lookup failures: ${failures?.backedOff ?? 0} backed off, ${failures?.retryDue ?? 0} retry due` }),
+    el('small', { text: failures?.newestUpdatedAt ? `Newest failure ${formatDate(failures.newestUpdatedAt)}` : 'No failed cover lookups cached' })
+  ]);
+}
+
+function hydrationStatusCard(hydrationStatus) {
+  const track = hydrationStatus?.track || {};
+  const cover = hydrationStatus?.cover || {};
+  return el('div', { className: 'stat' }, [
+    el('b', { text: track.queued ?? 0 }),
+    el('span', { text: `Track hydration: ${track.hydrating ?? 0} hydrating, ${track.complete ?? 0} complete, ${track.failed ?? 0} failed` }),
+    el('small', { text: `Cover status: ${cover.queued ?? 0} queued, ${cover.complete ?? 0} complete, ${cover.failed ?? 0} failed` })
   ]);
 }
 
