@@ -1,4 +1,5 @@
 ﻿import crypto from 'node:crypto';
+import dns from 'node:dns/promises';
 import fs from 'node:fs';
 import net from 'node:net';
 import path from 'node:path';
@@ -1212,21 +1213,53 @@ function isPrivateIpv4(hostname) {
   );
 }
 
-function safeProbeImageUrl(value) {
+function isPrivateIpv6(hostname) {
+  const normalized = String(hostname || '').toLowerCase();
+  return (
+    normalized === '::' ||
+    normalized === '::1' ||
+    normalized.startsWith('fc') ||
+    normalized.startsWith('fd') ||
+    normalized.startsWith('fe80') ||
+    normalized.startsWith('::ffff:127.') ||
+    normalized.startsWith('::ffff:10.') ||
+    normalized.startsWith('::ffff:192.168.')
+  );
+}
+
+function privateNetworkHostname(hostname) {
+  const normalized = String(hostname || '').trim().toLowerCase();
+  if (!normalized || normalized === 'localhost' || normalized.endsWith('.localhost')) return true;
+  const ipVersion = net.isIP(normalized);
+  if (ipVersion === 4) return isPrivateIpv4(normalized);
+  if (ipVersion === 6) return isPrivateIpv6(normalized);
+  return false;
+}
+
+function safeProbeImageUrlCandidate(value) {
   const text = String(value || '').trim();
   if (!text || text.length > 1000) return '';
   try {
     const url = new URL(text);
     if (!['http:', 'https:'].includes(url.protocol)) return '';
     if (url.username || url.password) return '';
-    const hostname = url.hostname.toLowerCase();
-    if (!hostname || hostname === 'localhost' || hostname.endsWith('.localhost')) return '';
-    const ipVersion = net.isIP(hostname);
-    if (ipVersion === 4 && isPrivateIpv4(hostname)) return '';
-    if (ipVersion === 6) {
-      if (hostname === '::1' || hostname.startsWith('fc') || hostname.startsWith('fd') || hostname.startsWith('fe80')) return '';
-    }
+    if (privateNetworkHostname(url.hostname)) return '';
     return url.href;
+  } catch {
+    return '';
+  }
+}
+
+async function safeProbeImageUrl(value) {
+  const safeUrl = safeProbeImageUrlCandidate(value);
+  if (!safeUrl) return '';
+  const hostname = new URL(safeUrl).hostname;
+  if (net.isIP(hostname)) return safeUrl;
+  try {
+    const records = await dns.lookup(hostname, { all: true, verbatim: false });
+    if (!records.length) return '';
+    if (records.some((record) => privateNetworkHostname(record.address))) return '';
+    return safeUrl;
   } catch {
     return '';
   }
@@ -1353,7 +1386,7 @@ async function imageUrlWorks(value) {
   const safeUrl = safeExternalImageUrl(value);
   if (!safeUrl) return false;
   if (isLocalCoverPublicPath(safeUrl)) return localCoverExists(safeUrl);
-  const probeUrl = safeProbeImageUrl(safeUrl);
+  const probeUrl = await safeProbeImageUrl(safeUrl);
   if (!probeUrl) return false;
   const cachedPersistent = cachedCoverProbe(probeUrl);
   if (cachedPersistent !== null) return cachedPersistent;
