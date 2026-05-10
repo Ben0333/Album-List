@@ -1194,6 +1194,35 @@ function compactAlbumIdentity(title, artist) {
   return `${compactIdentityText(artist) || 'unknown'}::${compactTitle}`;
 }
 
+function normalizedAsin(value) {
+  const asin = String(value || '').trim().toUpperCase();
+  return /^[A-Z0-9]{10}$/.test(asin) ? asin : '';
+}
+
+function amazonAsinCoverCandidates(value) {
+  const asin = normalizedAsin(value);
+  if (!asin) return [];
+  return [
+    `https://images-na.ssl-images-amazon.com/images/P/${asin}.01.LZZZZZZZ.jpg`,
+    `https://m.media-amazon.com/images/P/${asin}.01._SCLZZZZZZZ_.jpg`
+  ];
+}
+
+function catalogCoverCandidatesForAlbum(album) {
+  return safeCoverUrlList(amazonAsinCoverCandidates(album?.asin));
+}
+
+function coverCandidatesForLookupAlbum(album) {
+  const providerCover = safeExternalImageUrl(album?.coverUrl || album?.cover_url);
+  const catalogCovers = catalogCoverCandidatesForAlbum(album);
+  if (album?.provider === 'musicbrainz') return safeCoverUrlList([...catalogCovers, providerCover]);
+  return safeCoverUrlList([providerCover, ...catalogCovers]);
+}
+
+function preferredCoverUrlForAlbum(album) {
+  return coverCandidatesForLookupAlbum(album)[0] || '';
+}
+
 function japaneseScriptScore(value) {
   return (String(value || '').match(/[\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Han}]/gu) || []).length;
 }
@@ -1310,6 +1339,60 @@ function musicBrainzReleaseSearchQuery(term) {
   return `(${uniqueClauses.map((clause) => `(${clause})`).join(' OR ')}) AND (primarytype:album OR primarytype:ep)`;
 }
 
+function releaseTitleFallbackScore(candidate) {
+  let score = 0;
+  if (candidate.titleWords >= 2 && candidate.titleWords <= 8) score += 40;
+  if (candidate.artistWords >= 1 && candidate.artistWords <= 5) score += 24;
+  if (candidate.titleWords >= candidate.artistWords) score += 8;
+  score -= Math.abs(candidate.titleWords - 5);
+  return score;
+}
+
+function releaseTitleFallbackCandidates(term) {
+  const query = clampText(term, 120);
+  const words = normalizeText(query).split(' ').filter(Boolean);
+  const candidates = [{ title: query, titleWords: words.length, artistWords: 0, score: 0 }];
+  for (let index = 1; index < words.length; index += 1) {
+    const left = words.slice(0, index);
+    const right = words.slice(index);
+    candidates.push({
+      title: left.join(' '),
+      titleWords: left.length,
+      artistWords: right.length
+    });
+    candidates.push({
+      title: right.join(' '),
+      titleWords: right.length,
+      artistWords: left.length
+    });
+  }
+
+  return uniqueBy(
+    candidates
+      .map((candidate) => ({
+        ...candidate,
+        title: clampText(candidate.title, 120),
+        score: candidate.score ?? releaseTitleFallbackScore(candidate)
+      }))
+      .filter((candidate) => rankingWords(candidate.title).length >= 2)
+      .sort((left, right) => right.score - left.score),
+    (candidate) => normalizeText(candidate.title)
+  )
+    .slice(0, 10)
+    .map((candidate) => candidate.title);
+}
+
+function musicBrainzReleaseTitleFallbackQuery(term) {
+  const clauses = releaseTitleFallbackCandidates(term).flatMap((title) =>
+    musicBrainzFieldClauseOptions('release', title, {
+      fuzzy: rankingWords(title).length <= 6
+    })
+  );
+  const uniqueClauses = uniqueBy(clauses, (clause) => clause).slice(0, 18);
+  if (!uniqueClauses.length) return '';
+  return `(${uniqueClauses.map((clause) => `(${clause})`).join(' OR ')}) AND (primarytype:album OR primarytype:ep)`;
+}
+
 function specialAlbumMatches(term) {
   const normalized = normalizeText(term);
   const queryWordCount = rankingWords(term).length;
@@ -1365,6 +1448,15 @@ function musicBrainzArtistCreditName(artistCredits = []) {
     .trim();
 }
 
+function musicBrainzCatalogNumbers(release) {
+  return uniqueBy(
+    (release?.['label-info'] || [])
+      .map((item) => clampText(item?.['catalog-number'], 80))
+      .filter(Boolean),
+    (catalogNumber) => normalizeText(catalogNumber)
+  );
+}
+
 function formatItunesAlbum(result) {
   return {
     provider: 'itunes',
@@ -1407,6 +1499,11 @@ function formatDeezerAlbum(result) {
 function formatMusicBrainzSearchAlbum(result) {
   const releaseGroup = result['release-group'] || {};
   const releaseDate = result.date || releaseGroup['first-release-date'] || '';
+  const coverUrl = preferredCoverUrlForAlbum({
+    provider: 'musicbrainz',
+    asin: result.asin,
+    coverUrl: `https://coverartarchive.org/release/${result.id}/front-500`
+  });
   return {
     provider: 'musicbrainz',
     providerId: `mb:${result.id}`,
@@ -1414,7 +1511,7 @@ function formatMusicBrainzSearchAlbum(result) {
     artist: musicBrainzArtistCreditName(result['artist-credit']) || '',
     releaseYear: releaseDate ? Number(String(releaseDate).slice(0, 4)) : null,
     trackCount: result['track-count'] || 0,
-    coverUrl: safeExternalImageUrl(`https://coverartarchive.org/release/${result.id}/front-500`),
+    coverUrl,
     sourceUrl: `https://musicbrainz.org/release/${result.id}`,
     releaseGroupId: releaseGroup.id || ''
   };
@@ -1617,12 +1714,22 @@ async function searchMusicBrainzAlbums(term) {
   if (query.length < 2) return [];
   const search = musicBrainzReleaseSearchQuery(query);
   if (!search) return [];
-  const url = new URL('https://musicbrainz.org/ws/2/release');
-  url.searchParams.set('query', search);
-  url.searchParams.set('fmt', 'json');
-  url.searchParams.set('limit', '20');
-  const data = await fetchMusicBrainzJson(url);
-  return (data.releases || [])
+  const fetchReleaseSearch = async (searchQuery) => {
+    const url = new URL('https://musicbrainz.org/ws/2/release');
+    url.searchParams.set('query', searchQuery);
+    url.searchParams.set('fmt', 'json');
+    url.searchParams.set('limit', '20');
+    const data = await fetchMusicBrainzJson(url);
+    return data.releases || [];
+  };
+
+  let releases = await fetchReleaseSearch(search);
+  if (!releases.length) {
+    const fallbackSearch = musicBrainzReleaseTitleFallbackQuery(query);
+    if (fallbackSearch && fallbackSearch !== search) releases = await fetchReleaseSearch(fallbackSearch);
+  }
+
+  return releases
     .filter((result) => result.id && result.title)
     .map((result) => ({
       ...formatMusicBrainzSearchAlbum(result),
@@ -1915,7 +2022,7 @@ async function lookupMusicBrainzRelease(releaseId) {
   const id = String(releaseId || '').trim();
   if (!/^[0-9a-f-]{36}$/i.test(id)) throw httpError(400, 'Album id is required.');
   const url = new URL(`https://musicbrainz.org/ws/2/release/${id}`);
-  url.searchParams.set('inc', 'recordings+artist-credits+release-groups');
+  url.searchParams.set('inc', 'recordings+artist-credits+release-groups+labels');
   url.searchParams.set('fmt', 'json');
   const data = await fetchMusicBrainzJson(url);
   const tracks = (data.media || [])
@@ -1932,6 +2039,12 @@ async function lookupMusicBrainzRelease(releaseId) {
       position: index + 1
     }))
     .filter((track) => track.title);
+  const asin = normalizedAsin(data.asin);
+  const coverUrl = preferredCoverUrlForAlbum({
+    provider: 'musicbrainz',
+    asin,
+    coverUrl: `https://coverartarchive.org/release/${id}/front-500`
+  });
 
   return {
     provider: 'musicbrainz',
@@ -1940,8 +2053,11 @@ async function lookupMusicBrainzRelease(releaseId) {
     artist: musicBrainzArtistCreditName(data['artist-credit']) || '',
     releaseYear: data.date ? Number(String(data.date).slice(0, 4)) : null,
     trackCount: tracks.length,
-    coverUrl: safeExternalImageUrl(`https://coverartarchive.org/release/${id}/front-500`),
+    coverUrl,
     sourceUrl: `https://musicbrainz.org/release/${id}`,
+    asin,
+    barcode: clampText(data.barcode, 80),
+    catalogNumbers: musicBrainzCatalogNumbers(data),
     tracks
   };
 }
@@ -2290,6 +2406,13 @@ function queueExploreCoverJobsForList(list, { priority = 90, limit = 48 } = {}) 
 async function resolveVerifiedAlbumCover(title, artist, country = 'US', excludedUrls = []) {
   const excluded = new Set(excludedUrls.map(safeExternalImageUrl).filter(Boolean));
   const rejected = new Set(excluded);
+  const tryCoverUrl = async (coverUrl, source) => {
+    const safeCoverUrl = safeExternalImageUrl(coverUrl);
+    if (!safeCoverUrl || excluded.has(safeCoverUrl) || rejected.has(safeCoverUrl)) return '';
+    if (await imageUrlWorks(safeCoverUrl)) return saveAlbumCover(title, artist, safeCoverUrl, source);
+    rejected.add(safeCoverUrl);
+    return '';
+  };
   for (const cached of storedAlbumCoverCandidates(title, artist)) {
     if (excluded.has(cached)) continue;
     if (await imageUrlWorks(cached)) return saveAlbumCover(title, artist, cached, 'verified-cache');
@@ -2297,10 +2420,17 @@ async function resolveVerifiedAlbumCover(title, artist, country = 'US', excluded
   }
   if (rejected.size) clearBadAlbumCoverReferences(title, artist, [...rejected]);
   for (const album of await albumCoverCandidates(title, artist, country)) {
-    const coverUrl = safeExternalImageUrl(album.coverUrl);
-    if (!coverUrl || excluded.has(coverUrl) || rejected.has(coverUrl)) continue;
-    if (await imageUrlWorks(coverUrl)) return saveAlbumCover(title, artist, coverUrl, album.provider || 'metadata');
-    rejected.add(coverUrl);
+    for (const coverUrl of coverCandidatesForLookupAlbum(album)) {
+      const verified = await tryCoverUrl(coverUrl, album.provider || 'metadata');
+      if (verified) return verified;
+    }
+    if (String(album.providerId || '').startsWith('mb:')) {
+      const lookup = await lookupAlbum(album.providerId, country).catch(() => null);
+      for (const coverUrl of coverCandidatesForLookupAlbum(lookup)) {
+        const verified = await tryCoverUrl(coverUrl, 'musicbrainz-catalog');
+        if (verified) return verified;
+      }
+    }
   }
   if (rejected.size) clearBadAlbumCoverReferences(title, artist, [...rejected]);
   return '';
@@ -2518,7 +2648,7 @@ async function hydrateAlbumInputTracks(albumInput, req) {
       return {
         ...albumInput,
         artist: albumInput?.artist || lookup.artist || '',
-        coverUrl: albumInput?.coverUrl || albumInput?.cover_url || lookup.coverUrl || '',
+        coverUrl: albumInput?.coverUrl || albumInput?.cover_url || preferredCoverUrlForAlbum(lookup),
         tracks
       };
     }
@@ -3634,7 +3764,7 @@ async function hydrateAlbumMetadataJob(job) {
   const lookup = await lookupAlbumForMetadataJob(job);
   const title = clampText(lookup?.title || job.title, 160);
   const artist = clampText(lookup?.artist || job.artist, 160);
-  const coverUrl = safeExternalImageUrl(lookup?.coverUrl || lookup?.cover_url || cachedAlbumCoverValue(title, artist));
+  const coverUrl = preferredCoverUrlForAlbum(lookup) || cachedAlbumCoverValue(title, artist);
   const tracks = sanitizeTracks(lookup?.tracks);
   const source = clampText(job.source_context || 'metadata-worker', 80);
   const albumInput = { title, artist, coverUrl, tracks };
@@ -3655,7 +3785,7 @@ async function hydrateTracklistJob(job) {
   const albumInput = {
     title: clampText(lookup.title || job.title, 160),
     artist: clampText(lookup.artist || job.artist, 160),
-    coverUrl: safeExternalImageUrl(lookup.coverUrl || lookup.cover_url || cachedAlbumCoverValue(job.title, job.artist)),
+    coverUrl: preferredCoverUrlForAlbum(lookup) || cachedAlbumCoverValue(job.title, job.artist),
     tracks
   };
   saveCanonicalAlbumTracks(albumInput, clampText(job.source_context || 'tracklist-worker', 80));
@@ -3682,9 +3812,13 @@ async function hydrateCoverJob(job) {
     const metadataCover = cachedAlbumCoverValue(title, artist);
     if (metadataCover && !isLocalCoverPublicPath(metadataCover)) sourceUrl = metadataCover;
   }
+  if (sourceUrl && !(await imageUrlWorks(sourceUrl))) {
+    clearBadAlbumCoverReferences(title, artist, [sourceUrl]);
+    sourceUrl = '';
+  }
   if (!sourceUrl && providerId && !providerId.startsWith('spotify:')) {
     const lookup = await lookupAlbum(providerId, 'US').catch(() => null);
-    sourceUrl = safeExternalImageUrl(lookup?.coverUrl || lookup?.cover_url);
+    sourceUrl = await firstWorkingCover(coverCandidatesForLookupAlbum(lookup));
     if (sourceUrl) saveCanonicalAlbumMetadata({ title: lookup?.title || title, artist: lookup?.artist || artist, coverUrl: sourceUrl }, 'cover-worker');
   }
   if (!sourceUrl) sourceUrl = await resolveVerifiedAlbumCover(title, artist, 'US').catch(() => '');
