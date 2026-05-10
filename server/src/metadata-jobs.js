@@ -1,6 +1,7 @@
 import crypto from 'node:crypto';
 import { db, nowIso, transaction } from '@albums/shared/db';
 import { config } from '@albums/shared/config';
+import { markHydrationJobStatus } from './hydration-status.js';
 
 export const metadataJobKinds = new Set(['album_metadata', 'cover', 'tracklist', 'explore_cover']);
 export const metadataJobStatuses = new Set(['queued', 'running', 'done', 'failed']);
@@ -112,6 +113,10 @@ export function enqueueMetadataJob(job, options = {}) {
     force,
     force
   );
+  const status = db.prepare('SELECT status FROM metadata_jobs WHERE job_key = ?').get(input.jobKey)?.status || 'queued';
+  if (status === 'queued' || status === 'running') {
+    markHydrationJobStatus(input, status === 'running' ? 'hydrating' : 'queued');
+  }
   return input.jobKey;
 }
 
@@ -169,12 +174,14 @@ export const claimNextMetadataJob = transaction(() => {
     )
     .run(lockedAt, lockedAt, row.id);
   if (!result.changes) return null;
-  return {
+  const claimed = {
     ...row,
     status: 'running',
     locked_at: lockedAt,
     attempts: Number(row.attempts || 0) + 1
   };
+  markHydrationJobStatus(claimed, 'hydrating');
+  return claimed;
 });
 
 export function completeMetadataJob(jobId) {
@@ -213,7 +220,13 @@ export function failMetadataJob(job, error) {
     nowIso(),
     job.id
   );
+  markHydrationJobStatus(job, finalFailure ? 'failed' : 'queued', message);
   return finalFailure;
+}
+
+export function pruneMetadataJobs() {
+  const cutoff = new Date(Date.now() - config.metadataJobSuccessRetentionDays * 24 * 60 * 60 * 1000).toISOString();
+  return db.prepare("DELETE FROM metadata_jobs WHERE status = 'done' AND updated_at < ?").run(cutoff).changes;
 }
 
 export function metadataQueueCounts() {

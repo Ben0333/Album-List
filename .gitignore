@@ -6,6 +6,7 @@
 !**/.env.admin.example
 **/data/*.sqlite
 **/data/*.sqlite-*
+**/data/covers/
 backups/
 stress-results/
 .claude/

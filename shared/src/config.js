@@ -78,7 +78,64 @@ export const config = {
   metadataJobMaxAttempts: parsePositiveInteger('METADATA_JOB_MAX_ATTEMPTS', process.env.METADATA_JOB_MAX_ATTEMPTS, 5, {
     min: 1,
     max: 50
-  })
+  }),
+  metadataJobSuccessRetentionDays: parsePositiveInteger(
+    'METADATA_JOB_SUCCESS_RETENTION_DAYS',
+    process.env.METADATA_JOB_SUCCESS_RETENTION_DAYS,
+    14,
+    {
+      min: 1,
+      max: 365
+    }
+  ),
+  searchCacheTtlHours: parsePositiveInteger('SEARCH_CACHE_TTL_HOURS', process.env.SEARCH_CACHE_TTL_HOURS, 24, {
+    min: 1,
+    max: 720
+  }),
+  searchCacheMaxRows: parsePositiveInteger('SEARCH_CACHE_MAX_ROWS', process.env.SEARCH_CACHE_MAX_ROWS, 10_000, {
+    min: 100,
+    max: 1_000_000
+  }),
+  coverProbeSuccessTtlHours: parsePositiveInteger(
+    'COVER_PROBE_SUCCESS_TTL_HOURS',
+    process.env.COVER_PROBE_SUCCESS_TTL_HOURS,
+    168,
+    {
+      min: 1,
+      max: 2160
+    }
+  ),
+  coverProbeFailureTtlHours: parsePositiveInteger(
+    'COVER_PROBE_FAILURE_TTL_HOURS',
+    process.env.COVER_PROBE_FAILURE_TTL_HOURS,
+    12,
+    {
+      min: 1,
+      max: 168
+    }
+  ),
+  coverProbeMaxRows: parsePositiveInteger('COVER_PROBE_MAX_ROWS', process.env.COVER_PROBE_MAX_ROWS, 50_000, {
+    min: 100,
+    max: 1_000_000
+  }),
+  coverLookupFailureBaseMinutes: parsePositiveInteger(
+    'COVER_LOOKUP_FAILURE_BASE_MINUTES',
+    process.env.COVER_LOOKUP_FAILURE_BASE_MINUTES,
+    60,
+    {
+      min: 1,
+      max: 24 * 60
+    }
+  ),
+  coverLookupFailureMaxHours: parsePositiveInteger(
+    'COVER_LOOKUP_FAILURE_MAX_HOURS',
+    process.env.COVER_LOOKUP_FAILURE_MAX_HOURS,
+    168,
+    {
+      min: 1,
+      max: 2160
+    }
+  )
 };
 
 function validateProductionConfig() {
