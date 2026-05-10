@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { api, ApiError, getErrorMessage } from '$lib/api';
+  import { ApiError, getErrorMessage } from '$lib/api';
   import Cover from './Cover.svelte';
   import Icon from './Icon.svelte';
 
@@ -12,6 +12,7 @@
   }
 
   export interface AlbumDetail {
+    providerId?: string;
     title: string;
     artist: string;
     coverUrl: string | null;
@@ -77,10 +78,16 @@
     adding = true;
     lastError = '';
     try {
-      const lookup = await api.get<{ album: AlbumDetail }>(
-        `/api/albums/lookup/${encodeURIComponent(suggestion.providerId)}`
+      await onPick(
+        {
+          providerId: suggestion.providerId,
+          title: suggestion.title,
+          artist: suggestion.artist,
+          coverUrl: suggestion.coverUrl,
+          tracks: []
+        },
+        suggestion
       );
-      await onPick(lookup.album, suggestion);
       query = '';
       suggestions = [];
       open = false;

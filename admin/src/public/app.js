@@ -3,6 +3,10 @@ let csrfToken = sessionStorage.getItem('albumsAdminCsrf') || '';
 let currentUsers = { q: '', status: 'all', limit: 25, offset: 0 };
 let currentReports = { q: '', status: '', priority: '', limit: 25, offset: 0 };
 let editingReportId = null;
+let currentRoute = normalizeAdminPath(window.location.pathname);
+let pollTimer = null;
+let pollBusy = false;
+let routingBound = false;
 
 const reportStatuses = [
   ['open', 'Open'],
@@ -16,6 +20,13 @@ const reportPriorities = [
   ['high', 'High'],
   ['critical', 'Critical']
 ];
+const adminPages = [
+  { path: '/admin/', label: 'Overview', title: 'Overview' },
+  { path: '/admin/users', label: 'Users', title: 'Users' },
+  { path: '/admin/bugs', label: 'Bugs', title: 'Bugs to Fix' },
+  { path: '/admin/explore', label: 'Explore', title: 'Explore Playlists' }
+];
+const pollIntervalMs = 10_000;
 
 function clear(node) {
   while (node.firstChild) node.removeChild(node.firstChild);
@@ -57,6 +68,109 @@ function showNotice(message, danger = false) {
   target.className = danger ? 'error' : 'notice';
   target.textContent = message;
   target.hidden = false;
+}
+
+function normalizeAdminPath(pathname) {
+  const path = String(pathname || '/admin/').replace(/\/+$/, '') || '/admin';
+  if (path === '/admin' || path === '/admin/index.html') return '/admin/';
+  if (path === '/admin/bug') return '/admin/bugs';
+  if (adminPages.some((page) => page.path === path)) return path;
+  return '/admin/';
+}
+
+function activePage() {
+  return adminPages.find((page) => page.path === currentRoute) || adminPages[0];
+}
+
+function bindRouting() {
+  if (routingBound) return;
+  routingBound = true;
+  window.addEventListener('popstate', () => {
+    currentRoute = normalizeAdminPath(window.location.pathname);
+    renderPage();
+  });
+}
+
+function navigateAdmin(path) {
+  const next = normalizeAdminPath(path);
+  if (next === currentRoute) return;
+  currentRoute = next;
+  history.pushState({}, '', next);
+  renderPage();
+}
+
+function navLink(page) {
+  return el(
+    'a',
+    {
+      href: page.path,
+      className: page.path === currentRoute ? 'active' : '',
+      onclick: (event) => {
+        event.preventDefault();
+        navigateAdmin(page.path);
+      }
+    },
+    page.label
+  );
+}
+
+function setPolling() {
+  stopPolling();
+  pollTimer = window.setInterval(() => {
+    refreshActivePage({ silent: true }).catch(() => {});
+  }, pollIntervalMs);
+}
+
+function stopPolling() {
+  if (pollTimer) window.clearInterval(pollTimer);
+  pollTimer = null;
+  pollBusy = false;
+}
+
+function userIsEditingWithin(target) {
+  const active = document.activeElement;
+  if (!target || !active || !target.contains(active)) return false;
+  return ['INPUT', 'TEXTAREA', 'SELECT'].includes(active.tagName);
+}
+
+function updateNav() {
+  const nav = document.querySelector('#admin-nav');
+  if (!nav) return;
+  clear(nav);
+  for (const page of adminPages) nav.append(navLink(page));
+}
+
+function updateLiveStatus(data) {
+  const target = document.querySelector('#admin-live-status');
+  if (!target || !data) return;
+  const activeVisitors = data.activeVisitors?.total ?? data.counts?.activeVisitors ?? 0;
+  const maintenance = Boolean(data.maintenance?.enabled);
+  target.className = maintenance ? 'live-status danger-card' : 'live-status';
+  target.textContent = `${activeVisitors} active - ${maintenance ? 'Maintenance on' : 'Public site open'}`;
+}
+
+async function loadLiveStatus() {
+  const data = await api('/admin/api/summary');
+  updateLiveStatus(data);
+  return data;
+}
+
+async function refreshActivePage({ silent = false, force = false } = {}) {
+  if (pollBusy && !force) return;
+  pollBusy = true;
+  try {
+    if (currentRoute === '/admin/') {
+      await loadSummary({ silent });
+    } else if (currentRoute === '/admin/users') {
+      await Promise.all([loadLiveStatus(), loadUsers({ silent })]);
+    } else if (currentRoute === '/admin/bugs') {
+      await Promise.all([loadLiveStatus(), loadReports({ silent })]);
+    } else if (currentRoute === '/admin/explore') {
+      await Promise.all([loadLiveStatus(), loadExplorePlaylists({ silent })]);
+    }
+  } finally {
+    pollBusy = false;
+  }
 }
 
 async function api(path, options = {}) {
@@ -140,6 +254,7 @@ async function downloadDatabaseBackup(button) {
 }
 
 function renderLogin(message = '') {
+  stopPolling();
   clear(root);
   root.className = 'login-shell';
   const form = el('form', { className: 'login-card stack' }, [
@@ -163,7 +278,6 @@ function renderLogin(message = '') {
       csrfToken = result.csrfToken || '';
       sessionStorage.setItem('albumsAdminCsrf', csrfToken);
       renderConsole();
-      await refreshAll();
     } catch (error) {
       renderLogin(error.message);
     } finally {
@@ -179,7 +293,11 @@ function renderConsole() {
   root.className = 'shell';
   root.append(
     el('header', { className: 'topbar' }, [
-      el('div', {}, [el('h1', { text: 'Turntable Admin' }), el('div', { className: 'muted', text: 'Private backend controls' })]),
+      el('div', {}, [
+        el('h1', { text: 'Turntable Admin' }),
+        el('div', { className: 'muted', text: 'Private backend controls' }),
+        el('div', { id: 'admin-live-status', className: 'live-status', text: 'Loading live status...' })
+      ]),
       el('div', { className: 'topbar-actions' }, [
         el('button', { className: 'secondary', text: 'Download DB backup', onclick: (event) => downloadDatabaseBackup(event.currentTarget) }),
         el('button', {
@@ -189,15 +307,45 @@ function renderConsole() {
             await api('/admin/api/logout', { method: 'POST' }).catch(() => {});
             csrfToken = '';
             sessionStorage.removeItem('albumsAdminCsrf');
+            stopPolling();
             renderLogin();
           }
         })
       ])
     ]),
+    el('nav', { id: 'admin-nav', className: 'admin-nav' }),
     el('div', { id: 'admin-notice', hidden: true }),
-    el('section', { id: 'summary', className: 'grid summary-grid' }),
-    el('section', { className: 'grid admin-stack' }, [usersPanel(), reportsPanel(), explorePanel()])
+    el('main', { id: 'admin-page', className: 'admin-stack' })
   );
+  bindRouting();
+  if (window.location.pathname !== currentRoute) history.replaceState({}, '', currentRoute);
+  setPolling();
+  renderPage();
+}
+
+function renderPage() {
+  currentRoute = normalizeAdminPath(window.location.pathname);
+  if (window.location.pathname !== currentRoute) history.replaceState({}, '', currentRoute);
+  updateNav();
+  const page = document.querySelector('#admin-page');
+  if (!page) return;
+  clear(page);
+  const pageInfo = activePage();
+  page.append(el('div', { className: 'page-title' }, [el('h2', { text: pageInfo.title }), el('span', { text: 'Auto-updates every 10 seconds' })]));
+  if (currentRoute === '/admin/') {
+    page.append(overviewPanel());
+  } else if (currentRoute === '/admin/users') {
+    page.append(usersPanel());
+  } else if (currentRoute === '/admin/bugs') {
+    page.append(reportsPanel());
+  } else if (currentRoute === '/admin/explore') {
+    page.append(explorePanel());
+  }
+  refreshActivePage({ force: true }).catch((error) => showNotice(error.message, true));
+}
+
+function overviewPanel() {
+  return el('section', { id: 'summary', className: 'grid summary-grid' });
 }
 
 function usersPanel() {
@@ -285,15 +433,20 @@ function explorePanel() {
 }
 
 async function refreshAll() {
-  await Promise.all([loadSummary(), loadUsers(), loadReports(), loadExplorePlaylists()]);
+  await refreshActivePage({ force: true });
 }
 
-async function loadSummary() {
+async function loadSummary({ silent = false } = {}) {
   const target = document.querySelector('#summary');
   if (!target) return;
-  clear(target);
+  if (!silent) {
+    clear(target);
+    target.append(el('div', { className: 'muted', text: 'Loading overview...' }));
+  }
   try {
     const data = await api('/admin/api/summary');
+    updateLiveStatus(data);
+    clear(target);
     const stats = [
       ['Users', data.counts.users],
       ['Active now', data.activeVisitors?.total ?? data.counts.activeVisitors],
@@ -307,10 +460,38 @@ async function loadSummary() {
     for (const [label, value] of stats) target.append(el('div', { className: 'stat' }, [el('b', { text: value }), el('span', { text: label })]));
     target.append(maintenanceCard(data.maintenance));
     target.append(storageCard(data.storage));
+    target.append(metadataQueueCard(data.metadataQueue));
+    target.append(localCoverCacheCard(data.localCoverCache));
     target.append(activeVisitorsCard(data.activeVisitors));
   } catch (error) {
+    clear(target);
     target.append(el('div', { className: 'error', text: error.message }));
   }
+}
+
+function metadataQueueCard(metadataQueue) {
+  const counts = metadataQueue?.counts || {};
+  return el('div', { className: 'stat' }, [
+    el('b', { text: counts.queued ?? 0 }),
+    el('span', { text: `Metadata jobs: ${counts.running ?? 0} running, ${counts.failed ?? 0} failed, ${counts.done ?? 0} done` }),
+    el('small', { text: metadataQueue?.oldestQueued ? `Oldest queued ${formatDate(metadataQueue.oldestQueued)}` : 'No queued metadata jobs' })
+  ]);
+}
+
+function localCoverCacheCard(localCoverCache) {
+  const count = localCoverCache?.count ?? 0;
+  const maxImages = localCoverCache?.maxImages ?? 0;
+  const bytes = localCoverCache?.byteLabel || '0 B';
+  const maxBytes = localCoverCache?.maxBytesLabel || '';
+  return el('div', { className: 'stat' }, [
+    el('b', { text: count }),
+    el('span', { text: `Local covers: ${bytes}${maxBytes ? ` of ${maxBytes}` : ''}` }),
+    el('small', {
+      text: maxImages
+        ? `Retaining up to ${maxImages} images. Newest access ${formatDate(localCoverCache?.newestAccessedAt) || 'n/a'}`
+        : 'Local cover cache limits unavailable'
+    })
+  ]);
 }
 
 function maintenanceCard(maintenance) {
@@ -356,11 +537,14 @@ function activeVisitorsCard(activeVisitors) {
   ]);
 }
 
-async function loadUsers() {
+async function loadUsers({ silent = false } = {}) {
   const target = document.querySelector('#users-result');
   if (!target) return;
-  clear(target);
-  target.append(el('div', { className: 'muted', text: 'Loading users...' }));
+  if (userIsEditingWithin(target) && silent) return;
+  if (!silent) {
+    clear(target);
+    target.append(el('div', { className: 'muted', text: 'Loading users...' }));
+  }
   try {
     const params = new URLSearchParams({ q: currentUsers.q, status: currentUsers.status, limit: String(currentUsers.limit), offset: String(currentUsers.offset) });
     const data = await api(`/admin/api/users?${params}`);
@@ -434,7 +618,7 @@ async function saveReportFromForm(event) {
     if (editingReportId) await api(`/admin/api/reports/${editingReportId}`, { method: 'PATCH', body: JSON.stringify(payload) });
     else await api('/admin/api/reports', { method: 'POST', body: JSON.stringify(payload) });
     clearReportForm();
-    await Promise.all([loadReports(), loadSummary()]);
+    await refreshAll();
   } catch (error) {
     showNotice(error.message, true);
   } finally {
@@ -442,11 +626,14 @@ async function saveReportFromForm(event) {
   }
 }
 
-async function loadReports() {
+async function loadReports({ silent = false } = {}) {
   const target = document.querySelector('#reports-result');
   if (!target) return;
-  clear(target);
-  target.append(el('div', { className: 'muted', text: 'Loading bug reports...' }));
+  if (userIsEditingWithin(target) && silent) return;
+  if (!silent) {
+    clear(target);
+    target.append(el('div', { className: 'muted', text: 'Loading bug reports...' }));
+  }
   try {
     const params = new URLSearchParams({
       q: currentReports.q,
@@ -505,7 +692,7 @@ function editReport(report) {
 async function quickReportUpdate(id, patch) {
   try {
     await api(`/admin/api/reports/${id}`, { method: 'PATCH', body: JSON.stringify(patch) });
-    await Promise.all([loadReports(), loadSummary()]);
+    await refreshAll();
   } catch (error) {
     showNotice(error.message, true);
   }
@@ -515,7 +702,7 @@ async function deleteReport(report) {
   if (!window.confirm(`Delete bug report #${report.id}?`)) return;
   try {
     await api(`/admin/api/reports/${report.id}`, { method: 'DELETE' });
-    await Promise.all([loadReports(), loadSummary()]);
+    await refreshAll();
   } catch (error) {
     showNotice(error.message, true);
   }
@@ -541,7 +728,7 @@ async function saveNewExplorePlaylist(event) {
     form.reset();
     form.querySelector('[name="visible"]').checked = true;
     form.querySelector('[name="sortOrder"]').value = '0';
-    await loadExplorePlaylists();
+    await refreshAll();
   } catch (error) {
     showNotice(error.message, true);
   } finally {
@@ -549,11 +736,14 @@ async function saveNewExplorePlaylist(event) {
   }
 }
 
-async function loadExplorePlaylists() {
+async function loadExplorePlaylists({ silent = false } = {}) {
   const target = document.querySelector('#explore-result');
   if (!target) return;
-  clear(target);
-  target.append(el('div', { className: 'muted', text: 'Loading Explore playlists...' }));
+  if (userIsEditingWithin(target) && silent) return;
+  if (!silent) {
+    clear(target);
+    target.append(el('div', { className: 'muted', text: 'Loading Explore playlists...' }));
+  }
   try {
     const data = await api('/admin/api/explore-playlists');
     clear(target);
@@ -613,7 +803,7 @@ async function saveExplorePlaylist(event, playlistId) {
   button.disabled = true;
   try {
     await api(`/admin/api/explore-playlists/${playlistId}`, { method: 'PATCH', body: JSON.stringify(playlistPayloadFromForm(form)) });
-    await loadExplorePlaylists();
+    await refreshAll();
   } catch (error) {
     showNotice(error.message, true);
   } finally {
@@ -625,7 +815,7 @@ async function reimportExplorePlaylist(playlist, form) {
   if (!window.confirm(`Reimport albums for ${playlist.name}? This replaces the imported album rows for this Explore playlist.`)) return;
   try {
     await api(`/admin/api/explore-playlists/${playlist.id}/import`, { method: 'POST', body: JSON.stringify(playlistPayloadFromForm(form)) });
-    await loadExplorePlaylists();
+    await refreshAll();
   } catch (error) {
     showNotice(error.message, true);
   }
@@ -635,7 +825,7 @@ async function deleteExplorePlaylist(playlist) {
   if (!window.confirm(`Delete Explore playlist ${playlist.name}?`)) return;
   try {
     await api(`/admin/api/explore-playlists/${playlist.id}`, { method: 'DELETE' });
-    await loadExplorePlaylists();
+    await refreshAll();
   } catch (error) {
     showNotice(error.message, true);
   }

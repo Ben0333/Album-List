@@ -9,6 +9,7 @@ services:
     environment:
       PORT: 3000
       DATABASE_PATH: /data/albums.sqlite
+      LOCAL_COVER_CACHE_DIR: /data/covers
       # NODE_ENV, APP_ORIGIN, COOKIE_SECURE, TRUST_PROXY, SESSION_DAYS come from .env
     env_file:
       - path: .env

@@ -130,6 +130,7 @@ export interface ListAlbum {
   createdAt: string;
   updatedAt: string;
   tracks: AlbumTrack[];
+  hydrationPending?: boolean;
   completions: AlbumCompletion[];
   pendingMembers: Member[];
   currentUserCompleted: boolean;

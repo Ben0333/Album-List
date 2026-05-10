@@ -39,6 +39,7 @@ const nodeEnv = process.env.NODE_ENV || 'development';
 const appOrigin = parseAppOrigin(process.env.APP_ORIGIN || 'http://localhost:3000');
 const cookieSecure = parseBoolean(process.env.COOKIE_SECURE, nodeEnv === 'production');
 const databasePath = path.resolve(repoRoot, process.env.DATABASE_PATH || './data/albums.sqlite');
+const localCoverCacheDir = path.resolve(repoRoot, process.env.LOCAL_COVER_CACHE_DIR || './data/covers');
 
 export const config = {
   nodeEnv,
@@ -50,7 +51,34 @@ export const config = {
   sessionDays: parsePositiveInteger('SESSION_DAYS', process.env.SESSION_DAYS, 30, { min: 1, max: 90 }),
   cookieSecure,
   trustProxy: parseBoolean(process.env.TRUST_PROXY, false),
-  databasePath
+  databasePath,
+  metadataWorkerEnabled: parseBoolean(process.env.METADATA_WORKER_ENABLED, true),
+  metadataWorkerPollMs: parsePositiveInteger('METADATA_WORKER_POLL_MS', process.env.METADATA_WORKER_POLL_MS, 1500, {
+    min: 250,
+    max: 60_000
+  }),
+  metadataWorkerConcurrency: parsePositiveInteger(
+    'METADATA_WORKER_CONCURRENCY',
+    process.env.METADATA_WORKER_CONCURRENCY,
+    1,
+    {
+      min: 1,
+      max: 8
+    }
+  ),
+  localCoverCacheDir,
+  maxLocalCoverImages: parsePositiveInteger('MAX_LOCAL_COVER_IMAGES', process.env.MAX_LOCAL_COVER_IMAGES, 5000, {
+    min: 1,
+    max: 1_000_000
+  }),
+  maxLocalCoverBytes: parsePositiveInteger('MAX_LOCAL_COVER_BYTES', process.env.MAX_LOCAL_COVER_BYTES, 12_000_000_000, {
+    min: 1,
+    max: Number.MAX_SAFE_INTEGER
+  }),
+  metadataJobMaxAttempts: parsePositiveInteger('METADATA_JOB_MAX_ATTEMPTS', process.env.METADATA_JOB_MAX_ATTEMPTS, 5, {
+    min: 1,
+    max: 50
+  })
 };
 
 function validateProductionConfig() {

@@ -246,6 +246,38 @@ db.exec(`
     PRIMARY KEY (album_key, track_key)
   );
 
+  CREATE TABLE IF NOT EXISTS album_image_cache (
+    album_key TEXT PRIMARY KEY,
+    source_url TEXT NOT NULL DEFAULT '',
+    local_path TEXT NOT NULL DEFAULT '',
+    public_path TEXT NOT NULL DEFAULT '',
+    mime_type TEXT NOT NULL DEFAULT '',
+    byte_size INTEGER NOT NULL DEFAULT 0,
+    content_hash TEXT NOT NULL DEFAULT '',
+    last_accessed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+  );
+
+  CREATE TABLE IF NOT EXISTS metadata_jobs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    job_key TEXT UNIQUE NOT NULL,
+    kind TEXT NOT NULL CHECK (kind IN ('album_metadata', 'cover', 'tracklist', 'explore_cover')),
+    album_key TEXT NOT NULL,
+    title TEXT NOT NULL,
+    artist TEXT NOT NULL DEFAULT '',
+    provider_id TEXT NOT NULL DEFAULT '',
+    source_context TEXT NOT NULL DEFAULT '',
+    priority INTEGER NOT NULL DEFAULT 50,
+    status TEXT NOT NULL DEFAULT 'queued' CHECK (status IN ('queued', 'running', 'done', 'failed')),
+    attempts INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT NOT NULL DEFAULT '',
+    available_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    locked_at TEXT,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+  );
+
   CREATE TABLE IF NOT EXISTS app_settings (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL,
@@ -310,6 +342,12 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_album_cover_cache_updated ON album_cover_cache(updated_at);
   CREATE INDEX IF NOT EXISTS idx_album_metadata_cache_updated ON album_metadata_cache(updated_at);
   CREATE INDEX IF NOT EXISTS idx_album_track_cache_album ON album_track_cache(album_key, disc_number, position);
+  CREATE INDEX IF NOT EXISTS idx_album_image_cache_accessed ON album_image_cache(last_accessed_at);
+  CREATE INDEX IF NOT EXISTS idx_album_image_cache_updated ON album_image_cache(updated_at);
+  CREATE INDEX IF NOT EXISTS idx_album_image_cache_public_path ON album_image_cache(public_path);
+  CREATE INDEX IF NOT EXISTS idx_metadata_jobs_claim ON metadata_jobs(status, priority, available_at, id);
+  CREATE INDEX IF NOT EXISTS idx_metadata_jobs_album ON metadata_jobs(album_key);
+  CREATE INDEX IF NOT EXISTS idx_metadata_jobs_updated ON metadata_jobs(updated_at);
   CREATE INDEX IF NOT EXISTS idx_explore_playlists_visible_order ON explore_playlists(visible, sort_order, name);
   CREATE INDEX IF NOT EXISTS idx_explore_playlist_albums_playlist_order ON explore_playlist_albums(playlist_id, sort_order, id);
   CREATE INDEX IF NOT EXISTS idx_explore_playlist_albums_key ON explore_playlist_albums(album_key);

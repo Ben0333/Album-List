@@ -9,6 +9,25 @@ import helmet from 'helmet';
 import { albumKey, closeDatabase, db, normalizeText, nowIso, trackKey, transaction } from '@albums/shared/db';
 import { config } from '@albums/shared/config';
 import { exploreLists as staticExploreLists } from './explore-data.js';
+import { createMetadataWorker } from './metadata-worker.js';
+import {
+  enqueueMetadataJob,
+  enqueueMetadataJobs,
+  hasPendingMetadataHydration,
+  metadataQueueDiagnostics
+} from './metadata-jobs.js';
+import {
+  cachedLocalCover,
+  coverSourceForAlbum,
+  downloadAlbumCover,
+  isLocalCoverPublicPath,
+  localCoverCacheSummary,
+  localCoverExists,
+  pruneLocalCoverCache,
+  rememberCoverSource,
+  safeCoverPublicPath,
+  serveLocalCover
+} from './local-cover-cache.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -107,6 +126,7 @@ app.use(validateRequestOrigin);
 app.use(express.json({ limit: '2mb' }));
 app.use(loadSession);
 app.use(appAvailabilityGate);
+app.get('/media/covers/:file', serveLocalCover);
 app.use(
   express.static(publicDir, {
     setHeaders(res, filePath) {
@@ -370,6 +390,8 @@ function avatarBytesMatchMime(mime, bytes) {
 
 function safeExternalImageUrl(value) {
   const text = String(value || '').trim();
+  const localCoverPath = safeCoverPublicPath(text);
+  if (localCoverPath) return localCoverPath;
   if (!text || text.length > 700) return '';
   try {
     const url = new URL(text);
@@ -387,7 +409,7 @@ function validateCoverUrl(value) {
   const text = String(value || '').trim();
   if (!text) return '';
   const safeUrl = safeExternalImageUrl(text);
-  if (!safeUrl) throw httpError(400, 'Cover image URL must be HTTPS.');
+  if (!safeUrl) throw httpError(400, 'Cover image URL must be HTTPS or a cached Turntable cover.');
   return safeUrl;
 }
 
@@ -1096,6 +1118,7 @@ async function cachedMetadata(cache, key, ttlMs, loader) {
 async function imageUrlWorks(value) {
   const safeUrl = safeExternalImageUrl(value);
   if (!safeUrl) return false;
+  if (isLocalCoverPublicPath(safeUrl)) return localCoverExists(safeUrl);
   const cached = imageProbeMemoryCache.get(safeUrl);
   if (cached && cached.expiresAt > Date.now()) return cached.works;
 
@@ -1955,9 +1978,13 @@ async function albumCoverCandidates(title, artist, country = 'US') {
 function cachedAlbumCoverValue(title, artist) {
   const key = albumKey(title, artist);
   if (!key) return '';
+  const localCover = cachedLocalCover(key);
+  if (localCover) return localCover;
   const row = db.prepare('SELECT cover_url FROM album_cover_cache WHERE album_key = ?').get(key);
   const cached = safeExternalImageUrl(row?.cover_url);
   if (cached) return cached;
+  const imageSource = coverSourceForAlbum(key);
+  if (imageSource) return imageSource;
   return '';
 }
 
@@ -1968,7 +1995,10 @@ function cachedAlbumCover(title, artist) {
   if (!key) return '';
   const metadata = albumMetadata(key);
   const metadataCover = safeExternalImageUrl(metadata.cover_url);
-  if (metadataCover) return saveAlbumCover(metadata.title || title, metadata.artist || artist, metadataCover, 'album-metadata');
+  if (metadataCover) {
+    if (isLocalCoverPublicPath(metadataCover) && !localCoverExists(metadataCover)) return coverSourceForAlbum(key) || '';
+    return saveAlbumCover(metadata.title || title, metadata.artist || artist, metadataCover, 'album-metadata');
+  }
   return '';
 }
 
@@ -1976,6 +2006,8 @@ function saveAlbumCover(title, artist, coverUrl, source = '') {
   const safeCoverUrl = safeExternalImageUrl(coverUrl);
   const key = albumKey(title, artist);
   if (!key || !safeCoverUrl) return '';
+  if (isLocalCoverPublicPath(safeCoverUrl)) return safeCoverUrl;
+  rememberCoverSource(key, safeCoverUrl);
   db.prepare(
     `INSERT INTO album_cover_cache (album_key, title, artist, cover_url, source, updated_at)
      VALUES (?, ?, ?, ?, ?, ?)
@@ -1997,6 +2029,8 @@ function storedAlbumCoverCandidates(title, artist) {
   const key = albumKey(title, artist);
   if (!key) return [];
   const rows = [
+    { cover_url: cachedLocalCover(key) },
+    { cover_url: coverSourceForAlbum(key) },
     ...db.prepare('SELECT cover_url FROM album_cover_cache WHERE album_key = ?').all(key),
     ...db.prepare('SELECT cover_url FROM album_metadata_cache WHERE album_key = ?').all(key)
   ];
@@ -2096,6 +2130,37 @@ function cachedTracksForAlbumKey(albumKeyValue) {
     .all(albumKeyValue);
 }
 
+function copyCachedTracksToListAlbum(listAlbumId, albumKeyValue) {
+  const cachedTracks = cachedTracksForAlbumKey(albumKeyValue);
+  if (!cachedTracks.length) return 0;
+  const existing = db.prepare('SELECT COUNT(*) AS count FROM album_tracks WHERE list_album_id = ?').get(listAlbumId).count || 0;
+  if (existing) return 0;
+  const insertTrack = db.prepare(
+    `INSERT INTO album_tracks (list_album_id, track_key, title, disc_number, position)
+     VALUES (?, ?, ?, ?, ?)`
+  );
+  for (const track of cachedTracks) {
+    insertTrack.run(listAlbumId, track.trackKey, track.title, track.discNumber || 1, track.position);
+  }
+  return cachedTracks.length;
+}
+
+function copyCachedTracksToListAlbums(albumKeyValue) {
+  let copied = 0;
+  const rows = db
+    .prepare(
+      `SELECT la.id
+       FROM list_albums la
+       LEFT JOIN album_tracks at ON at.list_album_id = la.id
+       WHERE la.album_key = ?
+       GROUP BY la.id
+       HAVING COUNT(at.id) = 0`
+    )
+    .all(albumKeyValue);
+  for (const row of rows) copied += copyCachedTracksToListAlbum(row.id, albumKeyValue);
+  return copied;
+}
+
 function saveCanonicalAlbumTracks(albumInput, source = '') {
   const key = saveCanonicalAlbumMetadata(albumInput, source);
   if (!key) return;
@@ -2112,6 +2177,114 @@ function saveCanonicalAlbumTracks(albumInput, source = '') {
       insertTrack.run(key, track.trackKey, track.title, track.discNumber || 1, track.position, updatedAt);
     }
   })();
+  copyCachedTracksToListAlbums(key);
+}
+
+function providerIdFromAlbumInput(albumInput) {
+  return clampText(albumInput?.providerId || albumInput?.provider_id || albumInput?.id, 220);
+}
+
+function sourceContextFromAlbumInput(albumInput, fallback = '') {
+  return clampText(albumInput?.sourceContext || albumInput?.source_context || fallback, 240);
+}
+
+function queueCoverJobForAlbum(albumInput, { priority = 50, sourceContext = '', force = false } = {}) {
+  const title = clampText(albumInput?.title, 160);
+  if (!title) return null;
+  const artist = clampText(albumInput?.artist, 160);
+  const key = albumKey(title, artist);
+  const coverUrl = safeExternalImageUrl(albumInput?.coverUrl || albumInput?.cover_url);
+  if (coverUrl && !isLocalCoverPublicPath(coverUrl)) rememberCoverSource(key, coverUrl);
+  if (cachedLocalCover(key) && !force) return null;
+  const needsLocalRedownload = Boolean(!cachedLocalCover(key) && (coverSourceForAlbum(key) || (coverUrl && !isLocalCoverPublicPath(coverUrl))));
+  const providerId = providerIdFromAlbumInput(albumInput);
+  const context = sourceContextFromAlbumInput(albumInput, sourceContext);
+  return enqueueMetadataJob(
+    {
+      kind: context.startsWith('explore:') ? 'explore_cover' : 'cover',
+      albumKey: key,
+      title,
+      artist,
+      providerId,
+      sourceContext: context,
+      priority
+    },
+    { force: force || needsLocalRedownload }
+  );
+}
+
+function queueAlbumHydrationJobs(albumInput, { priority = 20, sourceContext = '', forceCover = false } = {}) {
+  const title = clampText(albumInput?.title, 160);
+  if (!title) return [];
+  const artist = clampText(albumInput?.artist, 160);
+  const key = albumKey(title, artist);
+  saveCanonicalAlbumMetadata(albumInput, sourceContext || 'metadata-queue');
+  const providerId = providerIdFromAlbumInput(albumInput);
+  const context = sourceContextFromAlbumInput(albumInput, sourceContext);
+  const jobs = [
+    {
+      kind: 'album_metadata',
+      albumKey: key,
+      title,
+      artist,
+      providerId,
+      sourceContext: context,
+      priority
+    },
+    {
+      kind: 'tracklist',
+      albumKey: key,
+      title,
+      artist,
+      providerId,
+      sourceContext: context,
+      priority: priority + 5
+    }
+  ];
+  const keys = enqueueMetadataJobs(jobs);
+  const coverJobKey = queueCoverJobForAlbum(albumInput, {
+    priority: priority + 3,
+    sourceContext: context,
+    force: forceCover
+  });
+  if (coverJobKey) keys.push(coverJobKey);
+  return keys;
+}
+
+function queueSearchResultHydrationJobs(results) {
+  for (const album of (results || []).slice(0, 5)) {
+    queueAlbumHydrationJobs(album, {
+      priority: 65,
+      sourceContext: 'search'
+    });
+  }
+}
+
+function queueExploreCoverJobsForList(list, { priority = 90, limit = 48 } = {}) {
+  let queued = 0;
+  for (const [index, album] of list.albums.entries()) {
+    if (queued >= limit) break;
+    const key = albumKey(album.title, album.artist);
+    const coverUrl =
+      safeExternalImageUrl(album.coverUrl) ||
+      cachedExploreCover(list.slug, index) ||
+      cachedAlbumCoverValue(album.title, album.artist);
+    if (coverUrl && !isLocalCoverPublicPath(coverUrl)) rememberCoverSource(key, coverUrl);
+    if (cachedLocalCover(key)) continue;
+    const jobKey = queueCoverJobForAlbum(
+      {
+        ...album,
+        providerId: album.spotifyId ? `spotify:${album.spotifyId}` : '',
+        coverUrl,
+        sourceContext: `explore:${list.slug}:${index}`
+      },
+      {
+        priority,
+        sourceContext: `explore:${list.slug}:${index}`
+      }
+    );
+    if (jobKey) queued += 1;
+  }
 }
 
 async function resolveVerifiedAlbumCover(title, artist, country = 'US', excludedUrls = []) {
@@ -2141,10 +2314,12 @@ function insertAlbum(listId, userId, albumInput) {
   const coverUrl = validateCoverUrl(albumInput?.coverUrl || albumInput?.cover_url);
   const notes = clampText(albumInput?.notes, 1200);
   const key = albumKey(title, artist);
-  const tracks = sanitizeTracks(albumInput?.tracks);
+  const inputTracks = sanitizeTracks(albumInput?.tracks);
+  const tracks = inputTracks.length ? inputTracks : cachedTracksForAlbumKey(key);
   const existing = findAlbumInList(listId, title, artist);
   if (existing) {
     updateExistingAlbumFromInput(existing, { artist, coverUrl, tracks }, listId);
+    queueAlbumHydrationJobs({ ...albumInput, title, artist, coverUrl }, { priority: 15, sourceContext: 'list-add' });
     return Number(existing.id);
   }
   const albumCount = db.prepare('SELECT COUNT(*) AS count FROM list_albums WHERE list_id = ?').get(listId).count || 0;
@@ -2169,7 +2344,9 @@ function insertAlbum(listId, userId, albumInput) {
   for (const track of tracks) {
     insertTrack.run(info.lastInsertRowid, track.trackKey, track.title, track.discNumber || 1, track.position);
   }
-  saveCanonicalAlbumTracks({ title, artist, coverUrl, tracks }, 'list-album');
+  if (tracks.length) saveCanonicalAlbumTracks({ title, artist, coverUrl, tracks }, 'list-album');
+  else saveCanonicalAlbumMetadata({ title, artist, coverUrl }, 'list-album');
+  queueAlbumHydrationJobs({ ...albumInput, title, artist, coverUrl }, { priority: 15, sourceContext: 'list-add' });
 
   return Number(info.lastInsertRowid);
 }
@@ -2227,10 +2404,11 @@ function updateExistingAlbumFromInput(existing, albumInput, listId) {
   return transaction(() => {
     const artist = clampText(albumInput?.artist, 160);
     const coverUrl = validateCoverUrl(albumInput?.coverUrl || albumInput?.cover_url);
-    const tracks =
+    const inputTracks =
       Array.isArray(albumInput?.tracks) && albumInput.tracks.every((track) => track?.trackKey)
         ? albumInput.tracks
         : sanitizeTracks(albumInput?.tracks);
+    const tracks = inputTracks.length ? inputTracks : cachedTracksForAlbumKey(existing.album_key);
     let changed = false;
 
     if ((!existing.cover_url && coverUrl) || (!existing.artist && artist)) {
@@ -2845,6 +3023,20 @@ function buildListAlbumPayload(list, user, album, access) {
         .get(user.id, album.album_key, albumLevelTrackKey)
     : null;
 
+  const displayCoverUrl = safeExternalImageUrl(album.cover_url);
+  const queuedHydration = !tracks.length && hasPendingMetadataHydration(album.album_key);
+  if (!tracks.length) {
+    queueAlbumHydrationJobs(
+      { title: album.title, artist: album.artist, coverUrl: displayCoverUrl, sourceContext: 'list-view' },
+      { priority: 45, sourceContext: 'list-view' }
+    );
+  } else if (displayCoverUrl && !isLocalCoverPublicPath(displayCoverUrl) && !cachedLocalCover(album.album_key)) {
+    queueCoverJobForAlbum(
+      { title: album.title, artist: album.artist, coverUrl: displayCoverUrl, sourceContext: 'list-view' },
+      { priority: 55, sourceContext: 'list-view' }
+    );
+  }
+
   const ratingsByUser =
     showNamedRatings
       ? db
@@ -2876,7 +3068,7 @@ function buildListAlbumPayload(list, user, album, access) {
     albumKey: album.album_key,
     title: album.title,
     artist: album.artist,
-    coverUrl: safeExternalImageUrl(album.cover_url),
+    coverUrl: displayCoverUrl,
     externalUrl: albumExternalUrl(album, user?.musicPlatform || 'na'),
     notes: album.notes,
     sortOrder: album.sort_order,
@@ -2885,6 +3077,7 @@ function buildListAlbumPayload(list, user, album, access) {
     createdAt: album.created_at,
     updatedAt: album.updated_at,
     tracks,
+    hydrationPending: !tracks.length && (queuedHydration || hasPendingMetadataHydration(album.album_key)),
     completions,
     pendingMembers,
     currentUserCompleted: Boolean(user && completedIds.has(user.id)),
@@ -3225,16 +3418,22 @@ function canonicalCoverMapForAlbumKeys(albumKeys) {
     const chunk = uniqueKeys.slice(index, index + 500);
     const placeholders = chunk.map(() => '?').join(',');
     for (const row of db
+      .prepare(`SELECT album_key, public_path AS cover_url FROM album_image_cache WHERE album_key IN (${placeholders}) AND public_path != ''`)
+      .all(...chunk)) {
+      const coverUrl = safeExternalImageUrl(row.cover_url);
+      if (coverUrl && localCoverExists(coverUrl)) covers.set(row.album_key, coverUrl);
+    }
+    for (const row of db
       .prepare(`SELECT album_key, cover_url FROM album_cover_cache WHERE album_key IN (${placeholders})`)
       .all(...chunk)) {
       const coverUrl = safeExternalImageUrl(row.cover_url);
-      if (coverUrl) covers.set(row.album_key, coverUrl);
+      if (coverUrl && !covers.has(row.album_key)) covers.set(row.album_key, coverUrl);
     }
     for (const row of db
       .prepare(`SELECT album_key, cover_url FROM album_metadata_cache WHERE album_key IN (${placeholders})`)
       .all(...chunk)) {
       const coverUrl = safeExternalImageUrl(row.cover_url);
-      if (coverUrl) covers.set(row.album_key, coverUrl);
+      if (coverUrl && !covers.has(row.album_key)) covers.set(row.album_key, coverUrl);
     }
   }
   return covers;
@@ -3371,6 +3570,129 @@ async function resolveExploreCover(slug, albumIndex, album, options = {}) {
   return coverUrl;
 }
 
+function exploreContextFromJob(job) {
+  const match = String(job?.source_context || '').match(/^explore:([^:]+):(\d+)$/);
+  if (!match) return null;
+  const slug = match[1];
+  const albumIndex = Number(match[2]);
+  const list = exploreListBySlug(slug);
+  if (!list || !Number.isInteger(albumIndex) || albumIndex < 0 || albumIndex >= list.albums.length) return null;
+  return { list, album: list.albums[albumIndex], index: albumIndex };
+}
+
+async function lookupAlbumForMetadataJob(job) {
+  const providerId = clampText(job.provider_id, 220);
+  if (providerId && !providerId.startsWith('spotify:')) {
+    const lookup = await lookupAlbum(providerId, 'US').catch(() => null);
+    if (lookup?.title) return lookup;
+  }
+
+  const title = clampText(job.title, 160);
+  const artist = clampText(job.artist, 160);
+  const candidates = await albumLookupCandidatesForInput(title, artist, 'US').catch(() => []);
+  for (const candidate of candidates.slice(0, 6)) {
+    if (!albumMetadataMatchesInput(candidate, title, artist)) continue;
+    const lookup = await lookupAlbum(candidate.providerId, 'US').catch(() => null);
+    if (lookup?.title) return lookup;
+  }
+
+  return {
+    title,
+    artist,
+    coverUrl: cachedAlbumCoverValue(title, artist),
+    tracks: []
+  };
+}
+
+async function cacheLocalCoverForAlbum(albumInput, sourceContext = '') {
+  const title = clampText(albumInput?.title, 160);
+  if (!title) return null;
+  const artist = clampText(albumInput?.artist, 160);
+  const key = albumKey(title, artist);
+  const existing = cachedLocalCover(key);
+  if (existing) return { publicPath: existing, reused: true };
+  const sourceUrl =
+    coverSourceForAlbum(key) ||
+    (isLocalCoverPublicPath(albumInput?.coverUrl || albumInput?.cover_url) ? '' : safeExternalImageUrl(albumInput?.coverUrl || albumInput?.cover_url)) ||
+    storedAlbumCoverCandidates(title, artist).find((candidate) => !isLocalCoverPublicPath(candidate));
+  if (!sourceUrl) return null;
+  const downloaded = await downloadAlbumCover({
+    albumKey: key,
+    title,
+    artist,
+    sourceUrl
+  });
+  const context = sourceContext || albumInput?.sourceContext || albumInput?.source_context || '';
+  const exploreContext = context ? exploreContextFromJob({ source_context: context }) : null;
+  if (downloaded?.publicPath && exploreContext) {
+    saveExploreCover(exploreContext.list.slug, exploreContext.index, exploreContext.album, downloaded.publicPath);
+  }
+  return downloaded;
+}
+
+async function hydrateAlbumMetadataJob(job) {
+  const lookup = await lookupAlbumForMetadataJob(job);
+  const title = clampText(lookup?.title || job.title, 160);
+  const artist = clampText(lookup?.artist || job.artist, 160);
+  const coverUrl = safeExternalImageUrl(lookup?.coverUrl || lookup?.cover_url || cachedAlbumCoverValue(title, artist));
+  const tracks = sanitizeTracks(lookup?.tracks);
+  const source = clampText(job.source_context || 'metadata-worker', 80);
+  const albumInput = { title, artist, coverUrl, tracks };
+  if (tracks.length) saveCanonicalAlbumTracks(albumInput, source);
+  else saveCanonicalAlbumMetadata(albumInput, source);
+  syncHydratedAlbumToLists(albumInput);
+  await cacheLocalCoverForAlbum({ ...albumInput, sourceContext: job.source_context }, job.source_context);
+}
+
+async function hydrateTracklistJob(job) {
+  if (cachedTracksForAlbumKey(job.album_key).length) {
+    copyCachedTracksToListAlbums(job.album_key);
+    return;
+  }
+  const lookup = await lookupAlbumForMetadataJob(job);
+  const tracks = sanitizeTracks(lookup?.tracks);
+  if (!tracks.length) return;
+  const albumInput = {
+    title: clampText(lookup.title || job.title, 160),
+    artist: clampText(lookup.artist || job.artist, 160),
+    coverUrl: safeExternalImageUrl(lookup.coverUrl || lookup.cover_url || cachedAlbumCoverValue(job.title, job.artist)),
+    tracks
+  };
+  saveCanonicalAlbumTracks(albumInput, clampText(job.source_context || 'tracklist-worker', 80));
+  syncHydratedAlbumToLists(albumInput);
+}
+
+async function hydrateCoverJob(job) {
+  const title = clampText(job.title, 160);
+  const artist = clampText(job.artist, 160);
+  const key = albumKey(title, artist);
+  const existing = cachedLocalCover(key);
+  if (existing) {
+    const exploreContext = exploreContextFromJob(job);
+    if (exploreContext) saveExploreCover(exploreContext.list.slug, exploreContext.index, exploreContext.album, existing);
+    return;
+  }
+
+  let sourceUrl = coverSourceForAlbum(key);
+  const providerId = clampText(job.provider_id, 220);
+  if (!sourceUrl && providerId.startsWith('spotify:')) {
+    sourceUrl = await spotifyAlbumCover(providerId.slice('spotify:'.length)).catch(() => '');
+  }
+  if (!sourceUrl) {
+    const metadataCover = cachedAlbumCoverValue(title, artist);
+    if (metadataCover && !isLocalCoverPublicPath(metadataCover)) sourceUrl = metadataCover;
+  }
+  if (!sourceUrl && providerId && !providerId.startsWith('spotify:')) {
+    const lookup = await lookupAlbum(providerId, 'US').catch(() => null);
+    sourceUrl = safeExternalImageUrl(lookup?.coverUrl || lookup?.cover_url);
+    if (sourceUrl) saveCanonicalAlbumMetadata({ title: lookup?.title || title, artist: lookup?.artist || artist, coverUrl: sourceUrl }, 'cover-worker');
+  }
+  if (!sourceUrl) sourceUrl = await resolveVerifiedAlbumCover(title, artist, 'US').catch(() => '');
+  if (!sourceUrl || isLocalCoverPublicPath(sourceUrl)) return;
+  rememberCoverSource(key, sourceUrl);
+  await cacheLocalCoverForAlbum({ title, artist, coverUrl: sourceUrl, sourceContext: job.source_context }, job.source_context);
+}
+
 function listAlbumsForAlbumKey(albumKeyValue) {
   return db.prepare('SELECT * FROM list_albums WHERE album_key = ? ORDER BY updated_at DESC, id DESC').all(albumKeyValue);
 }
@@ -3493,6 +3815,7 @@ async function hydratedAlbumInputForKey(albumKeyValue, req, options = {}) {
   const source = exploreAlbumSourceByKey(albumKeyValue);
   const rejectedCoverUrls = new Set(safeCoverUrlList(options.brokenCoverUrls || []));
   const forceCoverRefresh = Boolean(options.forceCoverRefresh);
+  const forceMetadataRefresh = Boolean(options.forceMetadataRefresh);
   const fast = Boolean(options.fast);
   let coverUrl = '';
   const storedCoverUrl = safeExternalImageUrl(metadata.cover_url) || cachedAlbumCover(title, artist);
@@ -3506,7 +3829,7 @@ async function hydratedAlbumInputForKey(albumKeyValue, req, options = {}) {
       clearBadAlbumCoverReferences(title, artist, [...rejectedCoverUrls]);
     }
   }
-  let tracks = existingTracksForAlbumKey(albumKeyValue);
+  let tracks = forceMetadataRefresh ? [] : existingTracksForAlbumKey(albumKeyValue);
   let usedAlbumLookupRateLimit = false;
 
   if (!coverUrl && source && !forceCoverRefresh) {
@@ -3515,7 +3838,7 @@ async function hydratedAlbumInputForKey(albumKeyValue, req, options = {}) {
     if (coverUrl && rejectedCoverUrls.has(coverUrl)) coverUrl = '';
   }
 
-  if (!fast && !tracks.length) {
+  if (!fast && (!tracks.length || forceMetadataRefresh)) {
     usedAlbumLookupRateLimit = true;
     const hydrated = await hydrateAlbumInputTracks({ title, artist, coverUrl }, req);
     tracks = sanitizeTracks(hydrated?.tracks);
@@ -3526,7 +3849,7 @@ async function hydratedAlbumInputForKey(albumKeyValue, req, options = {}) {
     }
   }
 
-  if (!fast && !coverUrl) {
+  if (!fast && (!coverUrl || forceCoverRefresh || forceMetadataRefresh)) {
     if (!usedAlbumLookupRateLimit) limitAlbumLookup(req);
     coverUrl = await resolveVerifiedAlbumCover(title, artist, itunesCountry(req), [...rejectedCoverUrls]).catch(() => '');
   }
@@ -3540,11 +3863,37 @@ async function hydratedAlbumInputForKey(albumKeyValue, req, options = {}) {
       source ? `explore:${source.list.slug}` : 'album-detail'
     );
     if (source) saveExploreCover(source.list.slug, source.index, source.album, coverUrl);
+    if (!fast && !isLocalCoverPublicPath(coverUrl)) {
+      const localCover = await cacheLocalCoverForAlbum(
+        {
+          title,
+          artist,
+          coverUrl,
+          sourceContext: source ? `explore:${source.list.slug}:${source.index}` : 'album-detail'
+        },
+        source ? `explore:${source.list.slug}:${source.index}` : 'album-detail'
+      );
+      if (localCover?.publicPath) coverUrl = localCover.publicPath;
+    }
   }
 
   const albumInput = { title, artist, coverUrl, tracks };
   saveCanonicalAlbumTracks(albumInput, source ? `explore:${source.list.slug}` : 'album-detail');
   syncHydratedAlbumToLists(albumInput);
+  if (fast && (!tracks.length || !cachedLocalCover(albumKeyValue))) {
+    queueAlbumHydrationJobs(
+      {
+        title,
+        artist,
+        coverUrl,
+        sourceContext: source ? `explore:${source.list.slug}:${source.index}` : 'album-detail'
+      },
+      {
+        priority: 35,
+        sourceContext: source ? `explore:${source.list.slug}:${source.index}` : 'album-detail'
+      }
+    );
+  }
   return {
     album_key: albumKeyValue,
     title,
@@ -3847,6 +4196,8 @@ app.get(
         walBytes: fileSize(`${databasePath}-wal`),
         shmBytes: fileSize(`${databasePath}-shm`)
       },
+      metadataQueue: metadataQueueDiagnostics(),
+      localCoverCache: localCoverCacheSummary(),
       rateLimitBuckets: rateLimitBuckets.size
     });
   })
@@ -3901,7 +4252,7 @@ app.get(
   '/api/albums/by-key/:albumKey',
   route(async (req, res) => {
     const album = await hydratedAlbumInputForKey(req.params.albumKey, req, {
-      fast: req.query.fast === '1' || req.query.fast === 'true'
+      fast: req.query.refresh !== '1' && req.query.refresh !== 'true'
     });
     res.setHeader('Cache-Control', req.user ? 'private, no-cache' : 'no-store');
     res.json({ album: buildCanonicalAlbumPayload(album, req.user) });
@@ -3926,11 +4277,29 @@ app.post(
 );
 
 app.post(
+  '/api/albums/by-key/:albumKey/metadata/refresh',
+  route(async (req, res) => {
+    limitDbWrite(req, 'canonical-metadata-refresh');
+    limitAlbumLookup(req);
+    const album = await hydratedAlbumInputForKey(req.params.albumKey, req, {
+      forceMetadataRefresh: true,
+      forceCoverRefresh: req.body?.forceCover === true,
+      brokenCoverUrls: [req.body?.brokenUrl]
+    });
+    res.setHeader('Cache-Control', req.user ? 'private, no-cache' : 'no-store');
+    res.json({
+      ok: true,
+      album: buildCanonicalAlbumPayload(album, req.user)
+    });
+  })
+);
+
+app.post(
   '/api/albums/by-key/:albumKey/complete',
   route(async (req, res) => {
     const user = requireUser(req);
     limitDbWrite(req, 'completion-write');
-    const album = await hydratedAlbumInputForKey(req.params.albumKey, req);
+    const album = await hydratedAlbumInputForKey(req.params.albumKey, req, { fast: true });
 
     if (req.body?.completed === false) {
       transaction(() => {
@@ -3981,7 +4350,7 @@ app.patch(
   route(async (req, res) => {
     const user = requireUser(req);
     limitDbWrite(req, 'rating-write');
-    const album = await hydratedAlbumInputForKey(req.params.albumKey, req);
+    const album = await hydratedAlbumInputForKey(req.params.albumKey, req, { fast: true });
     const include = req.body?.includeInAverage === false ? 0 : 1;
     db.prepare(
       `INSERT INTO album_average_opt_in (user_id, album_key, include_in_average, updated_at)
@@ -3998,7 +4367,7 @@ app.put(
   route(async (req, res) => {
     const user = requireUser(req);
     limitDbWrite(req, 'rating-write');
-    const album = await hydratedAlbumInputForKey(req.params.albumKey, req);
+    const album = await hydratedAlbumInputForKey(req.params.albumKey, req, { fast: true });
     const rating = Number(req.body?.rating);
     if (!Number.isInteger(rating) || rating < 0 || rating > 10) {
       throw httpError(400, 'Rating must be a whole number from 0 to 10.');
@@ -4018,7 +4387,7 @@ app.patch(
   route(async (req, res) => {
     const user = requireUser(req);
     limitDbWrite(req, 'rating-write');
-    const album = await hydratedAlbumInputForKey(req.params.albumKey, req);
+    const album = await hydratedAlbumInputForKey(req.params.albumKey, req, { fast: true });
     const trackKeyValue = clampText(req.params.trackKey, 220);
     const track = album.tracks.find((item, index) => (item.trackKey || trackKey(item.title, index + 1)) === trackKeyValue);
     if (!track) throw httpError(404, 'Track not found.');
@@ -4041,7 +4410,7 @@ app.put(
   route(async (req, res) => {
     const user = requireUser(req);
     limitDbWrite(req, 'rating-write');
-    const album = await hydratedAlbumInputForKey(req.params.albumKey, req);
+    const album = await hydratedAlbumInputForKey(req.params.albumKey, req, { fast: true });
     const trackKeyValue = clampText(req.params.trackKey, 220);
     const track = album.tracks.find((item, index) => (item.trackKey || trackKey(item.title, index + 1)) === trackKeyValue);
     if (!track) throw httpError(404, 'Track not found.');
@@ -4082,7 +4451,9 @@ app.get(
     if (!list) throw httpError(404, 'Explore list not found.');
     if (req.user) res.setHeader('Cache-Control', 'private, no-cache');
     else cachePublic(res, 120, 600);
-    res.json({ list: exploreListWithCachedCovers(list, req.user) });
+    const payload = exploreListWithCachedCovers(list, req.user);
+    queueExploreCoverJobsForList(payload, { priority: 90 });
+    res.json({ list: payload });
   })
 );
 
@@ -4107,7 +4478,7 @@ app.put(
     if (!Number.isInteger(rating) || rating < 0 || rating > 10) {
       throw httpError(400, 'Rating must be a whole number from 0 to 10.');
     }
-    const album = await hydratedAlbumInputForKey(key, req);
+    const album = await hydratedAlbumInputForKey(key, req, { fast: true });
 
     const existingRating = db
       .prepare('SELECT include_in_average FROM track_ratings WHERE user_id = ? AND album_key = ? AND track_key = ?')
@@ -4126,17 +4497,32 @@ app.put(
 
 app.get(
   '/api/explore/:slug/covers',
-  route(async (req, res) => {
-    limitExploreCoverLookup(req);
+  route((req, res) => {
     const list = exploreListBySlug(req.params.slug);
     if (!list) throw httpError(404, 'Explore list not found.');
     const offset = Math.max(0, Number(req.query.offset || 0) || 0);
     const limit = Math.min(24, Math.max(1, Number(req.query.limit || 24) || 24));
     const slice = list.albums.slice(offset, offset + limit);
-    const covers = await Promise.all(slice.map(async (album, index) => ({
-      index: offset + index,
-      coverUrl: await resolveExploreCover(list.slug, offset + index, album)
-    })));
+    const covers = slice.map((album, index) => {
+      const albumIndex = offset + index;
+      const coverUrl =
+        safeExternalImageUrl(album.coverUrl) ||
+        cachedExploreCover(list.slug, albumIndex) ||
+        cachedAlbumCoverValue(album.title, album.artist);
+      queueCoverJobForAlbum(
+        {
+          ...album,
+          providerId: album.spotifyId ? `spotify:${album.spotifyId}` : '',
+          coverUrl,
+          sourceContext: `explore:${list.slug}:${albumIndex}`
+        },
+        {
+          priority: 90,
+          sourceContext: `explore:${list.slug}:${albumIndex}`
+        }
+      );
+      return { index: albumIndex, coverUrl: coverUrl || null };
+    });
     cachePublic(res, 300, 900);
     res.json({ covers });
   })
@@ -4144,19 +4530,32 @@ app.get(
 
 app.post(
   '/api/explore/:slug/covers/warm',
-  route(async (req, res) => {
-    limitExploreCoverLookup(req);
+  route((req, res) => {
     const list = exploreListBySlug(req.params.slug);
     if (!list) throw httpError(404, 'Explore list not found.');
     const offset = Math.max(0, Number(req.body?.offset || 0) || 0);
     const limit = Math.min(24, Math.max(1, Number(req.body?.limit || 24) || 24));
     const slice = list.albums.slice(offset, offset + limit);
-    const covers = await Promise.all(
-      slice.map(async (album, index) => ({
-        index: offset + index,
-        coverUrl: await resolveExploreCover(list.slug, offset + index, album)
-      }))
-    );
+    const covers = slice.map((album, index) => {
+      const albumIndex = offset + index;
+      const coverUrl =
+        safeExternalImageUrl(album.coverUrl) ||
+        cachedExploreCover(list.slug, albumIndex) ||
+        cachedAlbumCoverValue(album.title, album.artist);
+      queueCoverJobForAlbum(
+        {
+          ...album,
+          providerId: album.spotifyId ? `spotify:${album.spotifyId}` : '',
+          coverUrl,
+          sourceContext: `explore:${list.slug}:${albumIndex}`
+        },
+        {
+          priority: 90,
+          sourceContext: `explore:${list.slug}:${albumIndex}`
+        }
+      );
+      return { index: albumIndex, coverUrl: coverUrl || null };
+    });
     res.json({ covers, nextOffset: offset + slice.length, total: list.albums.length });
   })
 );
@@ -4189,6 +4588,7 @@ app.get(
   route(async (req, res) => {
     limitAlbumSearch(req);
     const results = await searchAlbums(req.query.q, itunesCountry(req));
+    queueSearchResultHydrationJobs(results);
     cachePublic(res, 300, 600);
     res.json({ results });
   })
@@ -4740,6 +5140,7 @@ app.post(
     const existing = findAlbumInList(list.id, title, artist);
     if (existing) {
       updateExistingAlbumFromInput(existing, req.body, list.id);
+      queueAlbumHydrationJobs({ ...req.body, title, artist }, { priority: 15, sourceContext: 'list-add' });
       res.json({
         copied: false,
         albumId: existing.id,
@@ -4767,18 +5168,19 @@ app.post(
 
 app.post(
   '/api/lists/:id/albums/copy',
-  route(async (req, res) => {
+  route((req, res) => {
     const user = requireUser(req);
     limitDbWrite(req, 'album-write');
     const list = getListOrThrow(Number(req.params.id));
     assertCanEdit(list, user);
-    const albumInput = await hydrateAlbumInputTracks(req.body, req);
+    const albumInput = req.body || {};
     const title = clampText(albumInput?.title, 160);
     if (!title) throw httpError(400, 'Album title is required.');
     const artist = clampText(albumInput?.artist, 160);
     const existing = findAlbumInList(list.id, title, artist);
     if (existing) {
       updateExistingAlbumFromInput(existing, albumInput, list.id);
+      queueAlbumHydrationJobs(albumInput, { priority: 15, sourceContext: 'list-copy' });
       res.json({
         copied: false,
         albumId: existing.id,
@@ -4826,7 +5228,7 @@ app.post(
     const refreshedCoverUrl = currentStillWorks
       ? currentCoverUrl
       : await resolveVerifiedAlbumCover(album.title, album.artist, itunesCountry(req), excludedCoverUrls);
-    const nextCoverUrl = refreshedCoverUrl || (currentStillWorks ? currentCoverUrl : '');
+    let nextCoverUrl = refreshedCoverUrl || (currentStillWorks ? currentCoverUrl : '');
 
     transaction(() => {
       db.prepare('UPDATE list_albums SET cover_url = ?, updated_at = ? WHERE id = ? AND list_id = ?').run(
@@ -4837,7 +5239,11 @@ app.post(
       );
       db.prepare('UPDATE lists SET updated_at = ? WHERE id = ?').run(nowIso(), list.id);
     })();
-    if (refreshedCoverUrl) repairAlbumCoverReferences(album.title, album.artist, refreshedCoverUrl, excludedCoverUrls, 'cover-refresh');
+    if (refreshedCoverUrl) {
+      repairAlbumCoverReferences(album.title, album.artist, refreshedCoverUrl, excludedCoverUrls, 'cover-refresh');
+      const localCover = await cacheLocalCoverForAlbum({ title: album.title, artist: album.artist, coverUrl: refreshedCoverUrl }, 'cover-refresh');
+      if (localCover?.publicPath) nextCoverUrl = localCover.publicPath;
+    }
 
     res.json({
       coverUrl: nextCoverUrl,
@@ -5345,30 +5751,61 @@ app.use((err, req, res, next) => {
 
 cleanupExpiredSessions();
 
-const server = app.listen(config.port, () => {
-  console.log(`Albums app listening on http://localhost:${config.port}`);
+try {
+  const pruned = pruneLocalCoverCache();
+  if (pruned.evictedCount) {
+    console.log(JSON.stringify({ event: 'local_cover_cache_pruned', evictedCount: pruned.evictedCount }));
+  }
+} catch (error) {
+  console.error(JSON.stringify({ event: 'local_cover_cache_prune_failure', error: String(error?.message || error) }));
+}
+
+const metadataWorker = createMetadataWorker({
+  handlers: {
+    album_metadata: hydrateAlbumMetadataJob,
+    cover: hydrateCoverJob,
+    tracklist: hydrateTracklistJob,
+    explore_cover: hydrateCoverJob
+  }
 });
 
+const server = app.listen(config.port, () => {
+  console.log(`Albums app listening on http://localhost:${config.port}`);
+  metadataWorker.start();
+});
+
+let shuttingDown = false;
+
 function shutdown(signal) {
+  if (shuttingDown) return;
+  shuttingDown = true;
   console.log(`${signal} received. Closing HTTP server and SQLite database.`);
   server.close((error) => {
-    if (error) {
-      console.error(error);
-      process.exitCode = 1;
-    }
-    try {
-      closeDatabase();
-    } catch (closeError) {
-      console.error(closeError);
-      process.exitCode = 1;
-    }
-    process.exit();
+    (async () => {
+      if (error) {
+        console.error(error);
+        process.exitCode = 1;
+      }
+      try {
+        await metadataWorker.stop();
+      } catch (workerError) {
+        console.error(workerError);
+        process.exitCode = 1;
+      }
+      try {
+        closeDatabase();
+      } catch (closeError) {
+        console.error(closeError);
+        process.exitCode = 1;
+      }
+      process.exit();
+    })();
   });
 
   setTimeout(() => {
     console.error('Shutdown timed out.');
     process.exit(1);
-  }, 10_000).unref();
+  }, 20_000).unref();
 }
 
 process.on('SIGINT', () => shutdown('SIGINT'));
